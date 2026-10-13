@@ -54,6 +54,21 @@ describe('parseSelect', () => {
       expect(embed.columns[1]).toMatchObject({ kind: 'embed', relation: 'users', alias: 'author' })
     }
   })
+
+  it('treats a bare "*" list item as a star, not a column', () => {
+    const items = parseSelect('*, terms(*)')
+    expect(items[0]).toMatchObject({ kind: 'star' })
+    expect(items[1]).toMatchObject({ kind: 'embed', relation: 'terms' })
+    expect(items[1]).not.toMatchObject({ kind: 'column' })
+
+    const leading = parseSelect('*, full_name, subjects(name)')
+    expect(leading[0]).toMatchObject({ kind: 'star' })
+    expect(leading[1]).toMatchObject({ kind: 'column', path: { base: 'full_name' } })
+    expect(leading[2]).toMatchObject({ kind: 'embed', relation: 'subjects' })
+
+    const trailing = parseSelect('id, *')
+    expect(trailing[1]).toMatchObject({ kind: 'star' })
+  })
 })
 
 describe('parseFilters', () => {

@@ -31,6 +31,34 @@ describe.skipIf(!available)('embedded resources', () => {
     expect(data).toEqual([{ title: 'hello', author: { name: 'alice' } }])
   })
 
+  it('selects all base columns together with an embed', async () => {
+    const { data, error } = await db
+      .from('pf_posts')
+      .select('*, pf_users(name)')
+      .eq('id', 1)
+      .single()
+    expect(error).toBeNull()
+    expect(data).toMatchObject({ id: 1, title: 'first post', pf_users: { name: 'gerald' } })
+    expect(data).toHaveProperty('user_id')
+  })
+
+  it('selects all base columns together with a nested embed', async () => {
+    const { data, error } = await db
+      .from('pf_users')
+      .select('*, pf_posts(id, pf_users(name))')
+      .eq('name', 'gerald')
+      .single()
+    expect(error).toBeNull()
+    expect(data).toMatchObject({
+      name: 'gerald',
+      pf_posts: [
+        { id: 1, pf_users: { name: 'gerald' } },
+        { id: 2, pf_users: { name: 'gerald' } },
+      ],
+    })
+    expect(data).toHaveProperty('id')
+  })
+
   it('embeds a to-many relationship', async () => {
     const { data } = await db.from('pf_users').select('name, pf_posts(title)').order('name')
     expect(data).toEqual([

@@ -110,6 +110,10 @@ export function parseSelect(input: string | undefined): SelectItem[] {
   for (const raw of splitTopLevel(input, ',')) {
     const item = raw.trim()
     if (item === '') continue
+    if (item === '*') {
+      items.push({ kind: 'star' })
+      continue
+    }
     items.push(parseItem(item))
   }
   return items
