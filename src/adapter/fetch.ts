@@ -58,12 +58,6 @@ function operationFor(req: ParsedRequest): QueryOperation {
   }
 }
 
-function isVolatileRpc(req: ParsedRequest, funcInfo?: any): boolean {
-  if (req.resource.kind !== 'rpc') return false
-  if (!funcInfo || !funcInfo.volatility) return true // default volatile? but spec says check; we don't have full info here easily
-  return funcInfo.volatility === 'volatile'
-}
-
 type FetchInput = Parameters<typeof fetch>[0]
 
 function normalizeHeaders(headers: RequestInit['headers'] | undefined): Record<string, string> {
@@ -123,8 +117,7 @@ function queryWithSignal(
   executor: Executor,
   signal: AbortSignal | undefined,
   text: string,
-  values: unknown[],
-  ctx?: any
+  values: unknown[]
 ): Promise<QueryResult> {
   // RoutingExecutor will choose; we pass through
   if (!signal) return executor.query(text, values)

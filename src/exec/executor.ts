@@ -114,8 +114,7 @@ export class PgClientExecutor implements Executor {
     const client = this.client as any
     const cursor = new Cursor(text, values || [])
     client.query(cursor)
-    let done = false
-    while (!done) {
+    while (true) {
       const rows = await new Promise<Record<string, unknown>[]>((resolve, reject) => {
         cursor.read(100, (err: any, r: any) => {
           if (err) return reject(err)
@@ -123,7 +122,6 @@ export class PgClientExecutor implements Executor {
         })
       })
       if (rows.length === 0) {
-        done = true
         try { cursor.close(() => {}) } catch {}
         break
       }

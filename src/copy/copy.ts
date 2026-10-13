@@ -121,18 +121,15 @@ export async function runCopy(
       const copyStream = mod.copyFrom(copySql)
       client.query(copyStream as unknown as Parameters<pg.Client['query']>[0])
 
-      let wrote = 0
       if (Array.isArray(rowsOrStream)) {
         const lines = encodeRows(rowsOrStream, columns, format, delimiter)
         for (const line of lines) {
           if (!copyStream.write(`${line}\n`)) await drain(copyStream)
-          wrote++
         }
       } else {
         for await (const row of rowsOrStream) {
           const line = encodeRows([row], columns, format, delimiter)[0]!
           if (!copyStream.write(`${line}\n`)) await drain(copyStream)
-          wrote++
         }
       }
       copyStream.end()

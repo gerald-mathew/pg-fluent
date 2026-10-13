@@ -29,6 +29,7 @@ it('accepts a generated Database generic', () => {
 
 it('infers row types from the select string', () => {
   const query = db.from('users').select('id, name')
+  expectTypeOf(query).not.toBeAny()
   type Data = Awaited<typeof query>['data']
   type Row = NonNullable<Data>[number]
   expectTypeOf<Row['id']>().toEqualTypeOf<number>()

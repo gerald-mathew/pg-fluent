@@ -48,7 +48,7 @@ src/
 ├─ observability/  logger, onQuery, OpenTelemetry
 ├─ extensions/     toSQL, allowUnfiltered, timeout, stream, primary
 └─ cli/            gen-types
-test/{unit,golden,security,integration,differential,types}
+test/{unit,security,integration,differential,types}
 bench/             reproducible benchmark harness
 ```
 
@@ -67,7 +67,7 @@ bench/             reproducible benchmark harness
 
 - Keep commits focused and write a clear message.
 - Open a pull request against `main`; describe the change, the motivation, and how it was tested.
-- CI must be green (lint, typecheck, unit/golden/security, integration).
+- CI must be green (lint, typecheck, unit/security, integration, differential).
 
 ## Reporting bugs and security issues
 

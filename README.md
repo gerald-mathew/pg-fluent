@@ -154,6 +154,10 @@ await db.from('posts').select('id, ...users(name)')       // spread a to-one rel
 await db.from('users').select('id, posts(title)').order('posts.title')
 ```
 
+A dotted filter or embedded modifier (`posts.title=eq.x`) requires the embed to be present in
+`select()`. If it is not, the request is rejected with `PGRST100` rather than silently dropping the
+filter — a dropped filter can turn a scoped read into a full-table read.
+
 Embedding **views** is not supported in v1.
 
 ## Writes
@@ -368,6 +372,7 @@ What differs from Supabase/PostgREST:
 | Auth / storage / edge functions | Not provided |
 | RLS / roles | Runs as the connecting role; Supabase role policies do not apply |
 | Views | Readable; **embedding views is unsupported** in v1 |
+| Embedded filters | A dotted filter/modifier on an embed that is not in `select()` is rejected with `PGRST100` instead of being silently ignored (which would return unfiltered rows) |
 | Streaming | Native `.stream()` (no HTTP chunking) |
 | Extras | `.toSQL()`, safe mutations, COPY, LISTEN, named connections, replicas |
 

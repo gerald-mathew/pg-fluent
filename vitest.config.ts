@@ -7,5 +7,11 @@ export default defineConfig({
     testTimeout: 20_000,
     hookTimeout: 30_000,
     pool: 'forks',
+    coverage: {
+      provider: 'v8',
+      reporter: ['text', 'lcov'],
+      include: ['src/**/*.ts'],
+      exclude: ['src/**/*.d.ts'],
+    },
   },
 })

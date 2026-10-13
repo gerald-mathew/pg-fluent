@@ -591,6 +591,6 @@ export async function runGenTypes(argv: string[]): Promise<void> {
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
-    throw new Error(message.replaceAll(connection, '***'))
+    throw new Error(message.replaceAll(connection, '***'), { cause: err })
   }
 }

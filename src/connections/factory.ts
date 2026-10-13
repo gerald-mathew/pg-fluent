@@ -1,9 +1,8 @@
 import pg from 'pg'
 import { PgExecutor, type Executor } from '../exec/executor.js'
-import type { ConnectionConfig, ReplicaConfig, RoutedConnectionConfig, SingleConnectionConfig } from './types.js'
+import type { ConnectionConfig, RoutedConnectionConfig, SingleConnectionConfig } from './types.js'
 import { isRouted } from './types.js'
 import { RoutingExecutor } from './router.js'
-import { DEFAULT_RETRIES, DEFAULT_STATEMENT_TIMEOUT_MS } from '../client.js'
 
 export interface ConnectionBundle {
   executor: Executor
@@ -51,7 +50,7 @@ export function buildConnectionBundle(
   const replicas: Executor[] = []
   const replicaPools: pg.Pool[] = []
   for (const rep of routed.replicas ?? []) {
-    const { pool, owned } = buildSinglePool(rep, defaults.statementTimeoutMs)
+    const { pool } = buildSinglePool(rep, defaults.statementTimeoutMs)
     replicaPools.push(pool)
     replicas.push(new PgExecutor(pool))
   }

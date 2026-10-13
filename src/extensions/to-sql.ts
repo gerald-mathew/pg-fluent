@@ -50,13 +50,13 @@ interface InternalBuilder {
 }
 
 async function streamErrorFromResponse(res: Response): Promise<unknown> {
-  let text = ''
+  let text: string
   try {
     text = await res.text()
   } catch {
     text = ''
   }
-  let payload: unknown = null
+  let payload: unknown
   try {
     payload = JSON.parse(text)
   } catch {

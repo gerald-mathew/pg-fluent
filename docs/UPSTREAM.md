@@ -17,7 +17,7 @@ pinned version and the reason for every bump.
   1. Update the exact version in `package.json`.
   2. Re-capture the request-contract fixtures from the new upstream for every builder method and
      review the diff (URL, headers, body shape).
-  3. Re-run the golden, differential and type fixtures; fix any contract drift.
+  3. Re-run the differential and type fixtures; fix any contract drift.
   4. Add a row to the table above with the date and a short reason (bug fix, new method,
      contract change, security fix).
 - A bump that changes observable SQL or results is called out in the changelog as at least a minor
