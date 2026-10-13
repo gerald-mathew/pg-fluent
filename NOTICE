@@ -1,0 +1,32 @@
+pg-fluent
+Copyright (c) 2026 Mathew Gerald
+
+This product includes software developed by third parties. The following
+components are used at runtime (see package.json for the exact versions):
+
+  - @supabase/postgrest-js  (MIT License)
+    Copyright (c) Supabase Inc.
+    https://github.com/supabase/postgrest-js
+
+  - pg (node-postgres)  (MIT License)
+    Copyright (c) 2010-2024 Brian Carlson
+    https://github.com/brianc/node-postgres
+
+  - pg-cursor  (MIT License)
+    Copyright (c) 2010-2024 Brian Carlson
+    https://github.com/brianc/node-postgres
+
+Optional peer dependencies, used only when the corresponding feature is enabled:
+
+  - pg-copy-streams  (MIT License)  — required for db.copyFrom()
+    https://github.com/brianc/node-pg-copy-streams
+
+  - @opentelemetry/api  (Apache License 2.0)  — required for telemetry: true
+    https://github.com/open-telemetry/opentelemetry-js
+
+Each dependency remains under its own license and copyright. The full text of
+each license is available in the corresponding package distributed with it.
+
+pg-fluent is an independent project and is not affiliated with or endorsed by
+Supabase. "Supabase", "PostgREST" and "PostgreSQL" are trademarks of their
+respective owners and are used here only to describe compatibility.

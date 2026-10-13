@@ -1,0 +1,451 @@
+import pg from 'pg'
+import { PostgrestClient, type PostgrestClientOptions } from '@supabase/postgrest-js'
+import { PgFluentError } from './errors/index.js'
+import { createFetchAdapter } from './adapter/fetch.js'
+import { PgExecutor, type Executor, type TransactionOptions } from './exec/executor.js'
+import type { RetryConfig } from './exec/retry.js'
+import { Instrument, type Logger, type QueryEvent } from './observability/index.js'
+import { installExtensions } from './extensions/to-sql.js'
+import {
+  makeIdentifier,
+  makeSqlTag,
+  runUnsafe,
+  type IdentifierFragment,
+  type RawResult,
+  type SqlTag,
+} from './raw/index.js'
+import type { ConnectionConfig, RoutedConnectionConfig, SingleConnectionConfig } from './connections/types.js'
+import { isRouted } from './connections/types.js'
+import { RoutingExecutor } from './connections/router.js'
+import type { RouteContext } from './connections/router.js'
+import { assertChannel, ListenManager } from './listen/manager.js'
+import type { ListenMeta, ListenOptions, ListenSubscription } from './listen/manager.js'
+import { runCopy, type CopyFromOptions } from './copy/copy.js'
+
+export type { RetryConfig } from './exec/retry.js'
+export type { ConnectionConfig, SingleConnectionConfig, RoutedConnectionConfig } from './connections/types.js'
+export type { ReplicaConfig } from './connections/types.js'
+export type { ListenMeta, ListenOptions, ListenSubscription } from './listen/manager.js'
+export type { CopyFromOptions } from './copy/copy.js'
+
+export interface PoolOptions {
+  max?: number
+  idleTimeoutMillis?: number
+  connectionTimeoutMillis?: number
+}
+
+export interface PgFluentConfig {
+  connectionString?: string
+  host?: string
+  port?: number
+  database?: string
+  user?: string
+  password?: string
+  ssl?: pg.PoolConfig['ssl']
+  schemas?: string[]
+  pool?: pg.Pool | (pg.PoolConfig & PoolOptions)
+  maxRows?: number
+  statementTimeoutMs?: number | null
+  allowUnfilteredMutations?: boolean
+  retries?: RetryConfig
+  logger?: Logger
+  onQuery?: (event: QueryEvent) => void
+  /** Log parameter values (opt-in). Redact named columns via `redactColumns`. */
+  logParams?: boolean
+  redactColumns?: string[]
+  /** Enable OpenTelemetry spans when `@opentelemetry/api` is installed. */
+  telemetry?: boolean
+  connections?: Record<string, ConnectionConfig>
+  defaultConnection?: string
+}
+
+export interface PgFluentExtras<Database = unknown> {
+  readonly $pool: pg.Pool
+  close(options?: { timeoutMs?: number }): Promise<void>
+  /**
+   * Run `fn` on a single dedicated connection inside a transaction. Nested
+   * calls use savepoints. Throws (and rolls back) if `fn` throws; call
+   * `trx.rollback()` to roll back deliberately and resolve with `undefined`.
+   */
+  transaction<T>(
+    fn: (trx: PgFluentClient<Database>) => Promise<T>,
+    options?: TransactionOptions
+  ): Promise<T>
+  /** Alias for {@link transaction} when nesting; rolls back to a savepoint. */
+  savepoint<T>(fn: (trx: PgFluentClient<Database>) => Promise<T>): Promise<T>
+  /** Deliberately roll back the enclosing transaction. */
+  rollback(): never
+  /** Safe tagged-template SQL; interpolations are bound as parameters. */
+  sql: SqlTag
+  /** Execute a trusted SQL string with bound parameters. */
+  unsafe<T = Record<string, unknown>>(
+    text: string,
+    params?: readonly unknown[]
+  ): Promise<RawResult<T>>
+  /** Build a safely-quoted identifier fragment for use inside `sql`. */
+  identifier(name: string): IdentifierFragment
+  /** Switch to a named connection. */
+  connection(name: string): PgFluentClient<Database>
+  /** Force this read to execute against the primary instance. */
+  primary(): PgFluentClient<Database>
+  /** Clear the schema cache. */
+  refreshSchema(): void
+  /** Send a PostgreSQL notification. Payload is limited to 8000 bytes. */
+  notify(channel: string, payload?: string): Promise<void>
+  /**
+   * Subscribe to a channel on a dedicated, non-pooled connection shared across
+   * channels. Reconnects automatically (backoff + jitter) and re-`LISTEN`s on
+   * every channel after reconnection.
+   */
+  listen(
+    channel: string,
+    callback: (payload: string, meta: ListenMeta) => void,
+    options?: ListenOptions
+  ): Promise<ListenSubscription>
+  unlisten(channel: string): Promise<void>
+  unlistenAll(): Promise<void>
+  /**
+   * Bulk-load rows via COPY FROM STDIN. Requires the optional peer dependency
+   * `pg-copy-streams`. Not available inside transactions.
+   */
+  copyFrom(
+    table: string,
+    rows: readonly Record<string, unknown>[] | AsyncIterable<Record<string, unknown>>,
+    options?: CopyFromOptions
+  ): Promise<{ data: { rowCount: number } | null; error: unknown | null }>
+}
+
+/**
+ * Client options for a database type. Honours a generated
+ * `Database['__InternalSupabase']` override when present; otherwise assumes
+ * PostgREST 13 (the features pg-fluent implements, e.g. `maxAffected`, spread).
+ */
+type ClientOptionsFor<Database> = 0 extends 1 & Database
+  ? { PostgrestVersion: '13' }
+  : Database extends { __InternalSupabase: infer I extends PostgrestClientOptions }
+    ? I
+    : { PostgrestVersion: '13' }
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export type PgFluentClient<Database = any> = PostgrestClient<
+  Database,
+  ClientOptionsFor<Database>
+> &
+  PgFluentExtras<Database>
+
+export const DEFAULT_MAX_ROWS = 1000
+export const DEFAULT_STATEMENT_TIMEOUT_MS = 30000
+export const DEFAULT_RETRIES: RetryConfig = { max: 2, backoffMs: 50 }
+
+const ROLLBACK = Symbol('pgfluent.rollback')
+
+interface BuiltOptions {
+  schemas: string[]
+  defaultSchema: string
+  maxRows: number
+  allowUnfilteredMutations: boolean
+  retries: RetryConfig
+  instrument: Instrument
+  /** Build clients for named connections. */
+  getNamedClient?: (name: string) => PgFluentClient<any> | undefined
+  /** LISTEN/NOTIFY manager (top-level clients only). */
+  listener?: ListenManager
+}
+
+function buildPoolForSingle(config: SingleConnectionConfig, statementTimeoutDefault: number | null): { pool: pg.Pool; owned: boolean } {
+  if (config.pool instanceof pg.Pool) {
+    return { pool: config.pool, owned: false }
+  }
+  const poolConfig: pg.PoolConfig = {}
+  if (config.connectionString !== undefined) poolConfig.connectionString = config.connectionString
+  if (config.host !== undefined) poolConfig.host = config.host
+  if (config.port !== undefined) poolConfig.port = config.port
+  if (config.database !== undefined) poolConfig.database = config.database
+  if (config.user !== undefined) poolConfig.user = config.user
+  if (config.password !== undefined) poolConfig.password = config.password
+  if (config.ssl !== undefined) poolConfig.ssl = config.ssl
+  if (config.pool !== undefined && !(config.pool instanceof pg.Pool)) {
+    Object.assign(poolConfig, config.pool)
+  }
+
+  const timeout = config.statementTimeoutMs === undefined ? statementTimeoutDefault : config.statementTimeoutMs
+  if (timeout !== null) poolConfig.statement_timeout = timeout
+
+  return { pool: new pg.Pool(poolConfig), owned: true }
+}
+
+function buildPool(config: PgFluentConfig): { pool: pg.Pool; owned: boolean } {
+  // For backward compat when connections not used
+  const base: SingleConnectionConfig = {
+    connectionString: config.connectionString,
+    host: config.host,
+    port: config.port,
+    database: config.database,
+    user: config.user,
+    password: config.password,
+    ssl: config.ssl,
+    pool: config.pool,
+    statementTimeoutMs: config.statementTimeoutMs,
+  }
+  return buildPoolForSingle(base, config.statementTimeoutMs === undefined ? DEFAULT_STATEMENT_TIMEOUT_MS : config.statementTimeoutMs)
+}
+
+function buildClient<Database>(
+  executor: Executor,
+  pool: pg.Pool,
+  owned: boolean,
+  ownedPools: pg.Pool[] | undefined,
+  options: BuiltOptions
+): PgFluentClient<Database> {
+  installExtensions()
+
+  const fetchAdapter = createFetchAdapter({
+    executor,
+    schemas: options.schemas,
+    defaultSchema: options.defaultSchema,
+    maxRows: options.maxRows,
+    allowUnfilteredMutations: options.allowUnfilteredMutations,
+    retries: options.retries,
+    instrument: options.instrument,
+    getRouteContext: (req) => {
+      const ctx: RouteContext = {
+        forcePrimary: req.forcePrimary,
+        isWrite: req.method === 'POST' || req.method === 'PATCH' || req.method === 'DELETE',
+        isVolatileRpc: req.resource.kind === 'rpc',
+      }
+      return ctx
+    },
+  })
+
+  const rest = new PostgrestClient<Database, ClientOptionsFor<Database>>(
+    'http://pg-fluent.local',
+    {
+      fetch: fetchAdapter,
+      schema: options.defaultSchema as never,
+      retry: false,
+    }
+  )
+
+  let closed = false
+  const runTransaction = async <T>(
+    fn: (trx: PgFluentClient<Database>) => Promise<T>,
+    txOptions?: TransactionOptions
+  ): Promise<T> => {
+    try {
+      return await executor.transaction(async (tx) => {
+        const trx = buildClient<Database>(tx, pool, false, undefined, {
+          ...options,
+          listener: undefined,
+        })
+        return fn(trx)
+      }, txOptions)
+    } catch (err) {
+      if (err === ROLLBACK) return undefined as T
+      throw err
+    }
+  }
+
+  const extras: PgFluentExtras<Database> = {
+    $pool: pool,
+    async close(closeOptions?: { timeoutMs?: number }): Promise<void> {
+      if (closed) return
+      closed = true
+      if (!owned && !(ownedPools && ownedPools.length > 0)) return
+      const timeoutMs = closeOptions?.timeoutMs
+      if (timeoutMs === undefined) {
+        await options.listener?.stop()
+        if (owned) await pool.end()
+        if (ownedPools) {
+          await Promise.allSettled(ownedPools.map((p) => p.end()))
+        }
+        return
+      }
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const guard = new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () =>
+            reject(
+              new PgFluentError(
+                'PGFLUENT_CLOSED',
+                `Timed out closing the connection pool after ${timeoutMs} ms`
+              )
+            ),
+          timeoutMs
+        )
+        timer.unref?.()
+      })
+      try {
+        const tasks = []
+        if (options.listener) tasks.push(options.listener.stop())
+        if (owned) tasks.push(pool.end())
+        if (ownedPools) tasks.push(...ownedPools.map((p) => p.end()))
+        await Promise.race([Promise.allSettled(tasks).then(() => undefined), guard])
+      } finally {
+        if (timer !== undefined) clearTimeout(timer)
+      }
+    },
+    transaction: runTransaction,
+    savepoint<T>(fn: (trx: PgFluentClient<Database>) => Promise<T>): Promise<T> {
+      return runTransaction(fn)
+    },
+    rollback(): never {
+      throw ROLLBACK
+    },
+    sql: makeSqlTag(executor),
+    unsafe: (text: string, params?: readonly unknown[]) => runUnsafe(executor, text, params),
+    identifier: makeIdentifier,
+    connection(name: string): PgFluentClient<Database> {
+      const c = options.getNamedClient?.(name)
+      if (!c) throw new PgFluentError('PGFLUENT_INVALID_QUERY', `Unknown connection: ${name}`)
+      return c as any
+    },
+    primary(): PgFluentClient<Database> {
+      const hdr = (rest as any).headers ?? new Headers()
+      try {
+        if (typeof hdr.set === 'function') hdr.set('x-pgfluent-primary', '1')
+      } catch {}
+      return this as any
+    },
+    refreshSchema(): void {
+      const schemaCache = (fetchAdapter as any)?._schemaCache
+      if (schemaCache && typeof schemaCache.refresh === 'function') {
+        schemaCache.refresh()
+      } else if (schemaCache && typeof schemaCache.clear === 'function') {
+        schemaCache.clear()
+      }
+    },
+    async notify(channel: string, payload?: string): Promise<void> {
+      assertChannel(channel)
+      if (payload !== undefined && Buffer.byteLength(payload, 'utf8') > 8000) {
+        throw new PgFluentError(
+          'PGFLUENT_INVALID_QUERY',
+          `NOTIFY payload exceeds the 8000 byte limit (${Buffer.byteLength(payload, 'utf8')} bytes)`
+        )
+      }
+      if (payload !== undefined) {
+        await extras.sql`SELECT pg_notify(${channel}, ${payload})`
+      } else {
+        await extras.sql`SELECT pg_notify(${channel})`
+      }
+    },
+    async listen(
+      channel: string,
+      callback: (payload: string, meta: ListenMeta) => void,
+      listenOptions?: ListenOptions
+    ): Promise<ListenSubscription> {
+      assertChannel(channel)
+      if (!options.listener) {
+        throw new PgFluentError(
+          'PGFLUENT_INVALID_QUERY',
+          'db.listen() is not available on a transaction client'
+        )
+      }
+      return options.listener.subscribe(channel, callback, listenOptions)
+    },
+    async unlisten(channel: string): Promise<void> {
+      assertChannel(channel)
+      await options.listener?.unsubscribe(channel)
+    },
+    async unlistenAll(): Promise<void> {
+      await options.listener?.unlistenAll()
+    },
+    copyFrom: (
+      table: string,
+      rows: readonly Record<string, unknown>[] | AsyncIterable<Record<string, unknown>>,
+      copyOptions?: CopyFromOptions
+    ) => {
+      if (options.listener === undefined) {
+        return Promise.resolve<{ data: { rowCount: number } | null; error: unknown | null }>({
+          data: null,
+          error: new PgFluentError(
+            'PGFLUENT_INVALID_QUERY',
+            'db.copyFrom() is not available inside a transaction'
+          ),
+        })
+      }
+      return runCopy(pool, table, rows, copyOptions)
+    },
+  } as any
+
+  return Object.assign(rest, extras) as any
+}
+
+export function createClient<Database = any>(config: PgFluentConfig = {}): PgFluentClient<Database> {
+  const schemas = config.schemas && config.schemas.length > 0 ? config.schemas : ['public']
+  const defaultSchema = schemas[0]!
+  const maxRows = config.maxRows ?? DEFAULT_MAX_ROWS
+  const statementTimeoutDefault = config.statementTimeoutMs === undefined ? DEFAULT_STATEMENT_TIMEOUT_MS : config.statementTimeoutMs
+
+  const namedClients = new Map<string, PgFluentClient<any>>()
+  const getNamedClient = (name: string): PgFluentClient<any> | undefined => namedClients.get(name)
+
+  const buildOne = (name: string, cfg: PgFluentConfig): PgFluentClient<any> => {
+    const instrument = new Instrument({
+      logger: cfg.logger,
+      onQuery: cfg.onQuery,
+      logParams: cfg.logParams,
+      redactColumns: cfg.redactColumns,
+      telemetry: cfg.telemetry,
+    })
+
+    let bundle
+    if (config.connections && config.connections[name]) {
+      bundle = (function () {
+        const c = config.connections![name]!
+        if (isRouted(c)) {
+          const routed = c as RoutedConnectionConfig
+          const primary = buildPoolForSingle(routed.primary, statementTimeoutDefault)
+          const replicas: Executor[] = []
+          const ownedPoolsArr: pg.Pool[] = []
+          if (primary.owned) ownedPoolsArr.push(primary.pool)
+          for (const rep of routed.replicas ?? []) {
+            const sp2 = buildPoolForSingle(rep, statementTimeoutDefault)
+            replicas.push(new PgExecutor(sp2.pool))
+            if (sp2.owned) ownedPoolsArr.push(sp2.pool)
+          }
+          const executor = new RoutingExecutor({ primary: new PgExecutor(primary.pool), replicas })
+          return { executor, pool: primary.pool, owned: primary.owned, ownedPools: ownedPoolsArr }
+        }
+        const sp = buildPoolForSingle(c as SingleConnectionConfig, statementTimeoutDefault)
+        return { executor: new PgExecutor(sp.pool), pool: sp.pool, owned: sp.owned, ownedPools: sp.owned ? [sp.pool] : [] }
+      })()
+    } else {
+      const base: SingleConnectionConfig = {
+        connectionString: cfg.connectionString,
+        host: cfg.host,
+        port: cfg.port,
+        database: cfg.database,
+        user: cfg.user,
+        password: cfg.password,
+        ssl: cfg.ssl,
+        pool: cfg.pool,
+        statementTimeoutMs: cfg.statementTimeoutMs,
+      }
+      const sp = buildPoolForSingle(base, statementTimeoutDefault)
+      bundle = { executor: new PgExecutor(sp.pool), pool: sp.pool, owned: sp.owned, ownedPools: sp.owned ? [sp.pool] : [] }
+    }
+
+  return buildClient<Database>(bundle.executor, bundle.pool, bundle.owned, bundle.ownedPools, {
+    schemas,
+    defaultSchema,
+    maxRows,
+    allowUnfilteredMutations: cfg.allowUnfilteredMutations ?? false,
+    retries: cfg.retries ?? DEFAULT_RETRIES,
+    instrument,
+    getNamedClient,
+    listener: new ListenManager(bundle.pool.options),
+  }) as unknown as PgFluentClient<any>
+}
+
+  const defaultName = config.defaultConnection && config.connections?.[config.defaultConnection] ? config.defaultConnection : (config.connections ? Object.keys(config.connections)[0] ?? 'default' : 'default')
+  const defaultClient = buildOne(defaultName, config)
+  namedClients.set(defaultName, defaultClient)
+  if (config.connections) {
+    for (const name of Object.keys(config.connections)) {
+      if (!namedClients.has(name)) {
+        namedClients.set(name, buildOne(name, config))
+      }
+    }
+  }
+  return defaultClient as unknown as PgFluentClient<Database>
+}
