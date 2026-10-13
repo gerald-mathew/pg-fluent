@@ -19,6 +19,7 @@ describe.skipIf(!available)('routed connections', () => {
 
   it('closes primary and replica pools without double-end', async () => {
     const db = createClient({
+      schemas: [TEST_SCHEMA],
       connections: {
         main: {
           primary: { connectionString: TEST_URL, pool: searchPathPool() },
