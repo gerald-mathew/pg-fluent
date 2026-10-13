@@ -1,0 +1,47 @@
+name: Publish to GitHub Packages
+
+# Mirrors a release to GitHub Packages (npm.pkg.github.com) so it appears in
+# the repository's "Packages" sidebar. npmjs.com stays the primary registry and
+# is published by the `release` job in ci.yml.
+#
+# GitHub Packages only accepts owner-scoped npm names, so the package is
+# renamed to @gerald-mathew/pg-fluent inside the checkout; the repository's
+# package.json is never modified.
+#
+# Runs automatically on a v* tag, or manually (Actions -> Publish to GitHub
+# Packages -> Run workflow) to backfill a version already published to npm.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    name: npm.pkg.github.com
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: https://npm.pkg.github.com
+      - run: npm ci
+      - run: npm run build
+      - name: Scope name for GitHub Packages
+        run: |
+          node -e "
+          const fs = require('fs');
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          pkg.name = '@gerald-mathew/pg-fluent';
+          pkg.publishConfig = { ...(pkg.publishConfig || {}), registry: 'https://npm.pkg.github.com' };
+          fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+      - run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
