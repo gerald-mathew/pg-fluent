@@ -79,6 +79,21 @@ describe.skipIf(!available)('embedded resources', () => {
     expect(data).toMatchObject({ name: 'gerald', posts: [{ title: 'first post' }, { title: 'second post' }] })
   })
 
+  it('caps a to-many embed at maxRows even without an explicit limit', async () => {
+    const capped = testClient({ maxRows: 1 })
+    try {
+      const { data, error } = await capped
+        .from('pf_todos')
+        .select('id, pf_tags(tag)')
+        .eq('id', 1)
+        .single()
+      expect(error).toBeNull()
+      expect(data).toMatchObject({ id: 1, pf_tags: [{ tag: 'urgent' }] })
+    } finally {
+      await capped.close()
+    }
+  })
+
   it('maps a missing relationship to PGRST200', async () => {
     const { error, status } = await db.from('pf_users').select('pf_todos(*)')
     expect(status).toBe(400)

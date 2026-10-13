@@ -7,7 +7,7 @@ function parseError(message: string): PgFluentError {
   return new PgFluentError('PGFLUENT_INVALID_QUERY', `Invalid select: ${message}`)
 }
 
-/** Split `input` on `sep` at parenthesis depth 0, respecting double quotes. */
+/** Split `input` on `sep` at depth 0, respecting double quotes and literals. */
 export function splitTopLevel(input: string, sep: string): string[] {
   const out: string[] = []
   let depth = 0
@@ -20,8 +20,8 @@ export function splitTopLevel(input: string, sep: string): string[] {
       continue
     }
     if (quoted) continue
-    if (c === '(') depth++
-    else if (c === ')') depth--
+    if (c === '(' || c === '[' || c === '{') depth++
+    else if (c === ')' || c === ']' || c === '}') depth--
     else if (c === sep && depth === 0) {
       out.push(input.slice(start, i))
       start = i + 1

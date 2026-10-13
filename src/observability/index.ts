@@ -155,7 +155,7 @@ export class Instrument {
     if (!this.options.telemetry) return undefined
     const otel = await this.loadOtel()
     if (!otel) return undefined
-    const tracer = otel.tracer('pg-fluent')
+    const tracer = otel.trace.getTracer('pg-fluent')
     const span = tracer.startSpan(`pg-fluent ${info.operation} ${info.table}`)
     span.setAttribute('db.system', 'postgresql')
     span.setAttribute('db.operation.name', info.operation)
@@ -178,7 +178,9 @@ export class Instrument {
 }
 
 interface OtelApi {
-  tracer(name: string): { startSpan(name: string): SpanLike }
+  trace: {
+    getTracer(name: string): { startSpan(name: string): SpanLike }
+  }
 }
 
 function errorMessage(err: unknown): string {

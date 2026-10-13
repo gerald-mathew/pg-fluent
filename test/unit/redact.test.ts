@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { databaseError } from '../../src/errors/index.js'
 import { redactConnectionString, redactSecrets } from '../../src/errors/redact.js'
 
 describe('redactSecrets', () => {
@@ -17,6 +18,28 @@ describe('redactSecrets', () => {
     expect(redactSecrets('duplicate key value violates unique constraint')).toBe(
       'duplicate key value violates unique constraint'
     )
+  })
+})
+
+describe('databaseError', () => {
+  it('classifies a bare PostgreSQL error object', () => {
+    const err = databaseError({ code: '42P01' })
+    expect(err).toEqual({
+      message: '',
+      details: '',
+      hint: '',
+      code: '42P01',
+      kind: 'database',
+      status: 404,
+    })
+  })
+
+  it('redacts the message and maps timeout SQLSTATEs', () => {
+    const err = databaseError({
+      code: '57014',
+      message: 'canceling statement due to user request password=hunter2',
+    })
+    expect(err).toMatchObject({ kind: 'timeout', status: 504, message: 'canceling statement due to user request password=****' })
   })
 })
 

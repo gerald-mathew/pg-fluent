@@ -16,6 +16,7 @@ const IS_KEYWORDS: Readonly<Record<string, string>> = {
   true: 'TRUE',
   false: 'FALSE',
   unknown: 'UNKNOWN',
+  not_null: 'NOT NULL',
 }
 
 function invalid(message: string): PgFluentError {
@@ -27,10 +28,11 @@ function renderCondition(cond: FilterCondition, bag: ParamBag, alias: string): s
   let expr: string
   switch (cond.operator) {
     case 'eq':
-      expr = `${col} = ${bag.add(cond.value)}`
+      expr = cond.value.toLowerCase() === 'null' ? `${col} IS NULL` : `${col} = ${bag.add(cond.value)}`
       break
     case 'neq':
-      expr = `${col} <> ${bag.add(cond.value)}`
+      expr =
+        cond.value.toLowerCase() === 'null' ? `${col} IS NOT NULL` : `${col} <> ${bag.add(cond.value)}`
       break
     case 'gt':
       expr = `${col} > ${bag.add(cond.value)}`
@@ -80,17 +82,17 @@ function renderCondition(cond: FilterCondition, bag: ParamBag, alias: string): s
     case 'ov':
       expr = `${col} && ${bag.add(cond.value)}`
       break
+    case 'sl':
+      expr = `${col} << ${bag.add(cond.value)}`
+      break
     case 'sr':
       expr = `${col} >> ${bag.add(cond.value)}`
       break
     case 'nxl':
-      expr = `${col} << ${bag.add(cond.value)}`
-      break
-    case 'sl':
-      expr = `${col} &< ${bag.add(cond.value)}`
+      expr = `${col} &> ${bag.add(cond.value)}`
       break
     case 'nxr':
-      expr = `${col} &> ${bag.add(cond.value)}`
+      expr = `${col} &< ${bag.add(cond.value)}`
       break
     case 'adj':
       expr = `${col} -|- ${bag.add(cond.value)}`
@@ -113,12 +115,16 @@ function renderCondition(cond: FilterCondition, bag: ParamBag, alias: string): s
   return cond.negated ? `NOT (${expr})` : expr
 }
 
+function toLikePattern(value: string): string {
+  return value.replace(/\*/g, '%')
+}
+
 function renderLike(op: string, col: string, cond: FilterCondition, bag: ParamBag): string {
   if (cond.modifier === 'any' || cond.modifier === 'all') {
-    const list = parseListLiteral(cond.value)
+    const list = parseListLiteral(cond.value).map(toLikePattern)
     return `${col} ${op} ${cond.modifier.toUpperCase()}(${bag.add(list)}::text[])`
   }
-  return `${col} ${op} ${bag.add(cond.value)}`
+  return `${col} ${op} ${bag.add(toLikePattern(cond.value))}`
 }
 
 function renderNode(node: FilterNode, bag: ParamBag, alias: string): string {

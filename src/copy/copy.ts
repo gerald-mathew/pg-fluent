@@ -38,6 +38,11 @@ function escapeTextField(value: string): string {
   return value.replace(/\\/g, '\\\\').replace(/\t/g, '\\t').replace(/\n/g, '\\n').replace(/\r/g, '\\r')
 }
 
+/** Render a COPY option value (e.g. a delimiter) as a safe SQL string literal. */
+function sqlStringLiteral(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`
+}
+
 function renderValue(value: unknown): string {
   if (value === null || value === undefined) return ''
   if (typeof value === 'bigint') return value.toString()
@@ -55,10 +60,15 @@ function encodeRows(
   delimiter: string
 ): string[] {
   const esc = format === 'csv' ? escapeCsvField : escapeTextField
+  // COPY text format uses the `\N` sentinel for NULL; CSV treats an unquoted
+  // empty field as NULL by default.
+  const nullLiteral = format === 'csv' ? '' : '\\N'
   return rows.map((row) => {
     const fields = columns.map((col) => {
-      const value = renderValue((row as Record<string, unknown>)[col])
-      return value === '' && format === 'csv' && (row as Record<string, unknown>)[col] === '' ? '""' : esc(value)
+      const raw = (row as Record<string, unknown>)[col]
+      if (raw === null || raw === undefined) return nullLiteral
+      const value = renderValue(raw)
+      return value === '' && format === 'csv' && raw === '' ? '""' : esc(value)
     })
     return fields.join(delimiter)
   })
@@ -117,23 +127,37 @@ export async function runCopy(
         ? table.split('.').map((p) => quoteIdent(p)).join('.')
         : quoteIdent(table)
       const header = `(${columns.map((c) => quoteIdent(c)).join(', ')})`
-      const copySql = `COPY ${target} ${header} FROM STDIN WITH (FORMAT ${format.toUpperCase()}, DELIMITER ${JSON.stringify(delimiter)})`
+      const copySql = `COPY ${target} ${header} FROM STDIN WITH (FORMAT ${format.toUpperCase()}, DELIMITER ${sqlStringLiteral(delimiter)})`
       const copyStream = mod.copyFrom(copySql)
+      // Record stream errors as they happen so a write-loop never hangs on a
+      // dead stream and mid-stream failures reject the awaiting drain/finish.
+      let streamError: Error | undefined
+      copyStream.on('error', (err: Error) => {
+        streamError = err
+      })
       client.query(copyStream as unknown as Parameters<pg.Client['query']>[0])
+
+      const write = async (line: string): Promise<void> => {
+        if (streamError !== undefined) throw streamError
+        if (!copyStream.write(line)) await drain(copyStream)
+        if (streamError !== undefined) throw streamError
+      }
 
       if (Array.isArray(rowsOrStream)) {
         const lines = encodeRows(rowsOrStream, columns, format, delimiter)
-        for (const line of lines) {
-          if (!copyStream.write(`${line}\n`)) await drain(copyStream)
-        }
+        for (const line of lines) await write(`${line}\n`)
       } else {
         for await (const row of rowsOrStream) {
           const line = encodeRows([row], columns, format, delimiter)[0]!
-          if (!copyStream.write(`${line}\n`)) await drain(copyStream)
+          await write(`${line}\n`)
         }
       }
       copyStream.end()
       await new Promise<void>((resolve, reject) => {
+        if (streamError !== undefined) {
+          reject(streamError)
+          return
+        }
         copyStream.once('finish', () => resolve())
         copyStream.once('error', (err: Error) => reject(err))
       })
@@ -147,7 +171,8 @@ export async function runCopy(
 }
 
 function drain(stream: CopyStream): Promise<void> {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     stream.once('drain', () => resolve())
+    stream.once('error', (err: Error) => reject(err))
   })
 }

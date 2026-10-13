@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import { parseRequest } from '../../src/parser/request.js'
+import { parseFilters } from '../../src/parser/filter.js'
 import { planRead } from '../../src/planner/read.js'
 import { planWrite } from '../../src/planner/write.js'
+import { renderWhere } from '../../src/planner/where.js'
+import { ParamBag } from '../../src/sql/builder.js'
 import type { SchemaCache } from '../../src/schema/cache.js'
 
 const ctx = { schemas: ['public'], defaultSchema: 'public' }
@@ -62,6 +65,88 @@ describe('planRead', () => {
     const p = read()
     expect(p.text).not.toContain('drop table')
     expect(p.values).toContain("'; drop table users; --")
+  })
+})
+
+describe('filter SQL rendering', () => {
+  function where(query: string) {
+    const bag = new ParamBag()
+    const { filters } = parseFilters(new URLSearchParams(query))
+    return { text: renderWhere(filters, bag, '"t"'), values: bag.values }
+  }
+
+  it('maps range operators to the correct PostgreSQL operators', () => {
+    expect(where('a=sl.5').text).toContain('"t"."a" << $1')
+    expect(where('a=sr.5').text).toContain('"t"."a" >> $1')
+    expect(where('a=nxr.5').text).toContain('"t"."a" &< $1')
+    expect(where('a=nxl.5').text).toContain('"t"."a" &> $1')
+    expect(where('a=adj.5').text).toContain('"t"."a" -|- $1')
+  })
+
+  it('renders an empty in-list as FALSE', () => {
+    const { text, values } = where('a=in.()')
+    expect(text).toBe('FALSE')
+    expect(values).toEqual([])
+  })
+
+  it('supports is.not_null', () => {
+    expect(where('a=is.not_null').text).toBe('"t"."a" IS NOT NULL')
+  })
+
+  it('treats eq.null / neq.null as IS NULL / IS NOT NULL', () => {
+    expect(where('a=eq.null').text).toBe('"t"."a" IS NULL')
+    expect(where('a=neq.null').text).toBe('"t"."a" IS NOT NULL')
+    expect(where('a=eq.1').text).toBe('"t"."a" = $1')
+    expect(where('a=neq.1').text).toBe('"t"."a" <> $1')
+  })
+
+  it('keeps range literals (with commas) intact inside or()/and()', () => {
+    const { text, values } = where('or=rng.adj.[5,7),task.eq.write spec')
+    expect(text).toContain('"t"."rng" -|- $1')
+    expect(text).toContain('"t"."task" = $2')
+    expect(values).toEqual(['[5,7)', 'write spec'])
+  })
+
+  it('translates * to % for like/ilike', () => {
+    const single = where('a=like.*gerald*')
+    expect(single.text).toContain('"t"."a" LIKE $1')
+    expect(single.values).toEqual(['%gerald%'])
+    const list = where('a=ilike(any).{*x,*y}')
+    expect(list.text).toContain('ILIKE ANY($1::text[])')
+    expect(list.values).toEqual([['%x', '%y']])
+  })
+
+  it('renders the remaining comparison, array, regex and text-search operators', () => {
+    expect(where('a=neq.1').text).toContain('"t"."a" <> $1')
+    expect(where('a=gt.1').text).toContain('"t"."a" > $1')
+    expect(where('a=gte.1').text).toContain('"t"."a" >= $1')
+    expect(where('a=lt.1').text).toContain('"t"."a" < $1')
+    expect(where('a=lte.1').text).toContain('"t"."a" <= $1')
+    expect(where('a=match.^x').text).toContain('"t"."a" ~ $1')
+    expect(where('a=imatch.^x').text).toContain('"t"."a" ~* $1')
+    expect(where('a=isdistinct.1').text).toContain('"t"."a" IS DISTINCT FROM $1')
+    expect(where('a=cs.{1}').text).toContain('"t"."a" @> $1')
+    expect(where('a=cd.{1}').text).toContain('"t"."a" <@ $1')
+    expect(where('a=ov.{1}').text).toContain('"t"."a" && $1')
+    expect(where('a=fts.cat').text).toContain('to_tsquery($1)')
+    expect(where('a=plfts.cat').text).toContain('plainto_tsquery($1)')
+    expect(where('a=phfts.cat').text).toContain('phraseto_tsquery($1)')
+    expect(where('a=wfts.cat').text).toContain('websearch_to_tsquery($1)')
+    expect(where('a=fts(english).cat').text).toContain('to_tsquery($1::regconfig, $2)')
+  })
+
+  it('renders is, negation and logical trees', () => {
+    expect(where('a=is.true').text).toBe('"t"."a" IS TRUE')
+    expect(where('a=is.false').text).toBe('"t"."a" IS FALSE')
+    expect(where('a=is.unknown').text).toBe('"t"."a" IS UNKNOWN')
+    expect(where('a=not.eq.1').text).toBe('NOT ("t"."a" = $1)')
+    expect(where('or=(a.eq.1,b.gt.2)').text).toContain('("t"."a" = $1 OR "t"."b" > $2)')
+  })
+
+  it('wraps JSON access in to_jsonb and treats numeric keys as array indices', () => {
+    expect(where('tags->>0=eq.x').text).toContain('to_jsonb("t"."tags")->>0')
+    expect(where('tags->>0=eq.x').values).toEqual(['x'])
+    expect(where('meta->>author=eq.x').text).toContain('to_jsonb("t"."meta")->>($1::text)')
   })
 })
 

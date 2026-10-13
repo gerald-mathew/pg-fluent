@@ -340,7 +340,8 @@ function buildEmbedExpr(item: EmbedItem, parentAlias: string, ctx: BuildContext)
   let sub = `SELECT ${parts.join(', ')}\n      FROM ${fromExpr}`
   if (where) sub += `\n      WHERE ${where}`
   sub += order
-  if (limit !== undefined) sub += `\n      LIMIT ${Math.min(limit, ctx.maxRows)}`
+  const effectiveLimit = limit === undefined ? ctx.maxRows : Math.min(limit, ctx.maxRows)
+  if (Number.isFinite(effectiveLimit)) sub += `\n      LIMIT ${effectiveLimit}`
   if (offset !== undefined) sub += `\n      OFFSET ${offset}`
   return (
     `(SELECT COALESCE(json_agg(row_to_json(${subAlias})), '[]'::json) FROM (\n      ${sub}\n    ) AS ${subAlias}) ` +

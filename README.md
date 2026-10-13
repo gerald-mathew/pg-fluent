@@ -1,7 +1,21 @@
 # pg-fluent
 
-> Supabase-style fluent query builder ([`@supabase/postgrest-js`](https://github.com/supabase/postgrest-js))
-> executed **directly against PostgreSQL** over the wire protocol — no PostgREST server in between.
+<p align="center">
+  <a href="https://www.npmjs.com/package/pg-fluent"><img alt="npm version" height="28" src="https://img.shields.io/npm/v/pg-fluent?style=for-the-badge&logo=npm&logoColor=white&color=0A6F79"></a>
+  <a href="https://www.npmjs.com/package/pg-fluent"><img alt="npm downloads" height="28" src="https://img.shields.io/npm/dm/pg-fluent?style=for-the-badge&logo=npm&logoColor=white&color=0A6F79"></a>
+  <a href="https://github.com/gerald-mathew/pg-fluent/actions/workflows/ci.yml"><img alt="CI" height="28" src="https://img.shields.io/github/actions/workflow/status/gerald-mathew/pg-fluent/ci.yml?style=for-the-badge&logo=githubactions&logoColor=white"></a>
+  <img alt="MIT license" height="28" src="https://img.shields.io/badge/license-MIT-0A6F79?style=for-the-badge">
+</p>
+<p align="center">
+  <img alt="Node.js 22+" height="28" src="https://img.shields.io/badge/Node.js-22%2B-339933?style=for-the-badge&logo=nodedotjs&logoColor=white">
+  <img alt="PostgreSQL 15-18" height="28" src="https://img.shields.io/badge/PostgreSQL-15--18-4169E1?style=for-the-badge&logo=postgresql&logoColor=white">
+  <img alt="TypeScript" height="28" src="https://img.shields.io/badge/TypeScript-3178C6?style=for-the-badge&logo=typescript&logoColor=white">
+  <a href="https://node-postgres.com/"><img alt="Driver: node-postgres" height="28" src="https://img.shields.io/badge/driver-node--postgres-0A6F79?style=for-the-badge&logo=postgresql&logoColor=white"></a>
+</p>
+
+<p align="center">
+  <strong>Supabase-style fluent query builder — <a href="https://github.com/supabase/postgrest-js">postgrest-js</a> executed directly against PostgreSQL.</strong>
+</p>
 
 ```ts
 import { createClient } from 'pg-fluent'
@@ -137,8 +151,9 @@ await db.from('todos').select('id, meta->>author').eq('meta->>wip', 'true')
 const { text, values } = await db.from('todos').select('id').eq('done', false).toSQL() // no execution
 ```
 
-`.eq('col', null)` is rejected client-side (it never matches in SQL); use `.is('col', null)`.
-An empty `in([])` compiles to an always-false predicate rather than a syntax error.
+`.eq('col', null)` (and string `'null'`) compiles to `col IS NULL` — matching PostgREST semantics;
+use `.is('col', null)` for the same result with an explicit intent. An empty `in([])` compiles to an
+always-false predicate rather than a syntax error.
 
 ## Embedded resources
 
@@ -238,6 +253,9 @@ const { data, error } = await db.copyFrom('events', rows, { columns: ['id', 'kin
 // data -> { rowCount }
 ```
 
+`format: 'csv'` (default) writes an unquoted empty field for `null` and a quoted `""` for empty text;
+`format: 'text'` writes the `\N` sentinel for `null`. Values are always escaped by the library.
+
 ## LISTEN / NOTIFY
 
 ```ts
@@ -274,10 +292,10 @@ await db.connection('analytics').from('events').select('*')
 ```
 
 Read-replica routing is configured per connection with `{ primary, replicas: [...] }`. `SELECT`/
-`HEAD` and non-volatile `rpc` calls go to replicas (round-robin, with a short unhealthy-replica
-cool-down and fallback to the primary on **connection** errors only — never on query errors).
-Mutations, volatile RPC, transactions, LISTEN/NOTIFY and schema-cache loads always hit the primary.
-Force a primary read for read-your-writes with `.primary()`.
+`HEAD` queries go to replicas (round-robin, with a short unhealthy-replica cool-down and fallback to
+the primary on **connection** errors only — never on query errors). Mutations, all `rpc` calls,
+transactions, LISTEN/NOTIFY and schema-cache loads always hit the primary. Force a primary read for
+read-your-writes with `.primary()`.
 
 Replication is asynchronous: a read from a replica may not see a just-committed write. There is no
 lag measurement in v1.
@@ -310,9 +328,19 @@ cardinality, `PGRST200/201` relationship, `PGRST202/203` function, `PGRST204` co
 code `PGFLUENT_*` (`INVALID_QUERY`, `UNFILTERED_MUTATION`, `ABORTED`, `TIMEOUT`, `CONNECTION`,
 `POOL_EXHAUSTED`, `CLOSED`).
 
-`error.kind` classifies the failure as `validation`, `parse`, `database`, `connection`, `timeout`,
-`aborted` or `internal`. Distinguish clearly between **no rows** (success: `data: []`, or `null`
-for `maybeSingle`), **cardinality** (`PGRST116`), **invalid query** and **database failure**.
+Result `error` objects carry `{ message, details, hint, code }` plus `status`. `code` is the
+PostgreSQL **SQLSTATE** for database errors, a PostgREST `PGRSTxxx` code where an equivalent exists
+(`PGRST100` parse, `PGRST106` schema not exposed, `PGRST116` cardinality, `PGRST200/201`
+relationship, `PGRST202/203` function, `PGRST204` column), or a library code `PGFLUENT_*`
+(`INVALID_QUERY`, `UNFILTERED_MUTATION`, `ABORTED`, `TIMEOUT`, `CONNECTION`, `POOL_EXHAUSTED`,
+`CLOSED`).
+
+The `error.kind` classification (`validation`, `parse`, `database`, `connection`, `timeout`,
+`aborted` or `internal`) is carried by the library's own error type (`PgFluentError.kind`) and is
+available on the exported `databaseError()` helper, which wraps any Postgres error. Result `error`
+objects (the upstream PostgrestError shape) do not include `kind`. Distinguish clearly between
+**no rows** (success: `data: []`, or `null` for `maybeSingle`), **cardinality** (`PGRST116`),
+**invalid query** and **database failure**.
 
 Only idempotent work (reads/HEAD/non-volatile RPC) is retried on transient connection failures, with
 exponential backoff + jitter. Writes are never retried outside an opt-in transaction retry.
@@ -381,7 +409,7 @@ What differs from Supabase/PostgREST:
 
 | pg-fluent | Node | PostgreSQL | `@supabase/postgrest-js` |
 |---|---|---|---|
-| 0.1.x | 22, 24 (26 at LTS) | 15, 16, 17, 18 (19 at GA) | pinned exact (see `docs/UPSTREAM.md`) |
+| 0.2.x | 22, 24 (26 at LTS) | 15, 16, 17, 18 (19 at GA) | pinned exact (see `docs/UPSTREAM.md`) |
 
 The pinned `postgrest-js` version is recorded in `docs/UPSTREAM.md`, with the date and reason for
 every bump.
@@ -395,3 +423,5 @@ upstream is a minor release; otherwise it is a major release.
 ## License
 
 MIT © Mathew Gerald. See [LICENSE](./LICENSE).
+
+<p align="center"><sub>Built and maintained by <a href="https://github.com/gerald-mathew">Mathew Gerald Chukwudera</a></sub></p>

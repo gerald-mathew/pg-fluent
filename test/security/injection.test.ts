@@ -86,15 +86,20 @@ describe.skipIf(!available)('injection safety (S2)', () => {
     }
   })
 
-  it('treats insert JSON keys as untrusted and refuses unknown columns', async () => {
+  it('passes insert bodies as a single JSON parameter, never as SQL text', async () => {
     for (const payload of hostile) {
-      try {
-        const plan = await db.from('pf_todos').insert({ [payload]: 1 } as never).toSQL()
-        const escaped = payload.replace(/"/g, '""')
-        expect(plan.text.includes(`"${escaped}"`)).toBe(true)
-      } catch {
-        // unknown key -> client-side error is the expected safe outcome
-      }
+      const plan = await db.from('pf_todos').insert({ task: payload } as never).toSQL()
+      expect(plan.text).not.toContain(payload)
+      expect(JSON.parse(String(plan.values[0]))).toEqual([{ task: payload }])
+      expect(await canaryAlive()).toBe(true)
+    }
+  })
+
+  it('rejects hostile insert JSON keys as unknown columns', async () => {
+    for (const payload of hostile) {
+      await expect(
+        db.from('pf_todos').insert({ [payload]: 1 } as never).toSQL()
+      ).rejects.toMatchObject({ code: 'PGRST204' })
       expect(await canaryAlive()).toBe(true)
     }
   })

@@ -1,9 +1,26 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { canConnect, loadFixture, pgClient, postgrestReady, pgrstGet } from './helpers.js'
+import {
+  canConnect,
+  loadFixture,
+  pgClient,
+  POSTGREST_URL,
+  postgrestReady,
+  pgrstGet,
+} from './helpers.js'
 
 const connected = await canConnect()
 if (connected) await loadFixture()
 const served = connected && (await postgrestReady())
+
+// When PostgREST is requested (CI always sets PGFLUENT_POSTGREST_URL) a missing or
+// unreachable server must fail the run, never silently skip every test. Only an
+// unconfigured local run (no URL) is allowed to skip.
+if (POSTGREST_URL !== undefined && !served) {
+  throw new Error(
+    `PGFLUENT_POSTGREST_URL is set (${POSTGREST_URL}) but PostgREST is not reachable` +
+      (connected ? '' : ' (the test database is also unreachable)')
+  )
+}
 
 /**
  * Differential tests: run the same logical request through a real PostgREST

@@ -115,14 +115,14 @@ function explicitColumns(req: ParsedRequest): string[] | undefined {
  */
 function queryWithSignal(
   executor: Executor,
+  ctx: RouteContext | undefined,
   signal: AbortSignal | undefined,
   text: string,
   values: unknown[]
 ): Promise<QueryResult> {
-  // RoutingExecutor will choose; we pass through
-  if (!signal) return executor.query(text, values)
-  if (executor.queryWithSignal) return executor.queryWithSignal(text, values, signal)
-  return executor.query(text, values)
+  if (!signal) return executor.query(text, values, ctx)
+  if (executor.queryWithSignal) return executor.queryWithSignal(text, values, signal, ctx)
+  return executor.query(text, values, ctx)
 }
 
 async function runStatement(
@@ -131,13 +131,14 @@ async function runStatement(
   text: string,
   values: unknown[]
 ): Promise<Executed> {
+  const ctx = options.getRouteContext?.(req)
   if (req.timeoutMs === undefined) {
-    const result = await queryWithSignal(options.executor, req.signal, text, values)
+    const result = await queryWithSignal(options.executor, ctx, req.signal, text, values)
     return { ...result, attempts: 1 }
   }
   const result = await options.executor.transaction(async (tx) => {
     await tx.query(`SET LOCAL statement_timeout = ${Math.trunc(req.timeoutMs!)}`)
-    return queryWithSignal(tx, req.signal, text, values)
+    return queryWithSignal(tx, ctx, req.signal, text, values)
   })
   return { ...result, attempts: 1 }
 }
@@ -193,7 +194,11 @@ async function resolveCount(
 ): Promise<number | undefined> {
   if (countText === undefined) return undefined
   try {
-    const result = await options.executor.query(countText, countValues)
+    const result = await options.executor.query(
+      countText,
+      countValues,
+      options.getRouteContext?.(req)
+    )
     const raw = result.rows[0] ? Object.values(result.rows[0])[0] : undefined
     return raw === undefined || raw === null ? undefined : Number(raw)
   } catch {
@@ -267,10 +272,11 @@ async function explainResponse(
     const text = `EXPLAIN (${clauses.join(', ')}) ${plan.text}`
 
     const isMutation = req.method !== 'GET' && req.method !== 'HEAD'
+    const ctx = options.getRouteContext?.(req)
     const result =
       analyze && isMutation
         ? await runAndRollback(options.executor, (tx) => tx.query(text, plan.values))
-        : await options.executor.query(text, plan.values)
+        : await options.executor.query(text, plan.values, ctx)
 
     let body: string
     if (format === 'JSON') {
@@ -299,7 +305,12 @@ async function explainResponse(
  * is newline-delimited JSON; each `__pgfl_row` value is already a JSON string,
  * so it is passed through verbatim.
  */
-function streamResponse(executor: Executor, text: string, values: unknown[]): Response {
+function streamResponse(
+  executor: Executor,
+  ctx: RouteContext | undefined,
+  text: string,
+  values: unknown[]
+): Response {
   if (typeof executor.stream !== 'function') {
     return buildErrorResponse(
       new PgFluentError(
@@ -308,7 +319,7 @@ function streamResponse(executor: Executor, text: string, values: unknown[]): Re
       )
     )
   }
-  const generator = executor.stream(text, values)
+  const generator = executor.stream(text, values, ctx)
   const encoder = new TextEncoder()
   const body = new ReadableStream<Uint8Array>({
     async start(controller) {
@@ -399,7 +410,12 @@ export function createFetchAdapter(options: AdapterOptions): typeof fetch {
             )
           }
           const streamPlan = planStream(req, { maxRows: options.maxRows })
-          return streamResponse(options.executor, streamPlan.text, streamPlan.values)
+          return streamResponse(
+            options.executor,
+            options.getRouteContext?.(req),
+            streamPlan.text,
+            streamPlan.values
+          )
         }
         const plan = planRead(req, { maxRows: options.maxRows })
         const result = await executeStatement(options, req, plan.text, plan.values, true)

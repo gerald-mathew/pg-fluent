@@ -1,6 +1,6 @@
 {
   "name": "pg-fluent",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Supabase-style fluent query API (postgrest-js) executed directly against PostgreSQL over the wire protocol.",
   "license": "MIT",
   "author": "Mathew Gerald <mathewgerald.14@gmail.com>",

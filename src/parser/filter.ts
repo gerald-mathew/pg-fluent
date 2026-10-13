@@ -258,6 +258,7 @@ export function parseListLiteral(raw: string): string[] {
   if ((inner.startsWith('(') && inner.endsWith(')')) || (inner.startsWith('{') && inner.endsWith('}'))) {
     inner = inner.slice(1, -1)
   }
+  if (inner.trim() === '') return []
   const out: string[] = []
   let current = ''
   let quoted = false

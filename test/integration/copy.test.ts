@@ -65,4 +65,45 @@ describe.skipIf(!available)('copyFrom', () => {
     expect(data).toBeNull()
     expect(error).not.toBeNull()
   })
+
+  it('writes NULLs in text format', async () => {
+    const { data, error } = await db.copyFrom(
+      'pf_todos',
+      [
+        { task: 'text null', done: true, priority: null },
+        { task: 'text value', done: false, priority: 9 },
+      ],
+      { columns: ['task', 'done', 'priority'], format: 'text' }
+    )
+    expect(error).toBeNull()
+    expect(data?.rowCount).toBe(2)
+
+    const { data: rows } = await db
+      .from('pf_todos')
+      .select('task, priority')
+      .like('task', 'text %')
+      .order('task')
+    expect(rows).toEqual([
+      { task: 'text null', priority: null },
+      { task: 'text value', priority: 9 },
+    ])
+  })
+
+  it('surfaces COPY errors mid-stream instead of hanging', async () => {
+    const rows: { task: string; done: boolean; priority: number | string }[] = Array.from(
+      { length: 20000 },
+      (_, i) => ({
+        task: `bulk ${i}`,
+        done: false,
+        priority: i,
+      })
+    )
+    // A value that cannot be cast to int forces an error partway through the stream.
+    rows[15000] = { task: 'bulk bad', done: false, priority: 'not-a-number' }
+    const { data, error } = await db.copyFrom('pf_todos', rows, {
+      columns: ['task', 'done', 'priority'],
+    })
+    expect(data).toBeNull()
+    expect(error).not.toBeNull()
+  })
 })

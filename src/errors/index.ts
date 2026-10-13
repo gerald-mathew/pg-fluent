@@ -116,7 +116,7 @@ export function pgrstError(
 
 /** Shape of the errors returned by the `pg` driver. */
 export interface PgDatabaseError {
-  message: string
+  message?: string
   code?: string
   detail?: string | null
   hint?: string | null
@@ -132,7 +132,7 @@ export interface PgDatabaseError {
  */
 export function databaseError(err: PgDatabaseError): ClassifiedError {
   return {
-    message: redactSecrets(err.message),
+    message: redactSecrets(err.message ?? ''),
     details: redactSecrets(err.detail ?? ''),
     hint: redactSecrets(err.hint ?? ''),
     code: err.code ?? '',

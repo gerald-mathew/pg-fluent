@@ -24,8 +24,23 @@ function isRetryableTransactionError(err: unknown): boolean {
   return code === '40001' || code === '40P01'
 }
 
+export interface RouteContext {
+  /** Force primary for this operation (e.g. `.primary()`, transaction, etc.). */
+  forcePrimary?: boolean
+  /** Treat as a mutation/write. */
+  isWrite?: boolean
+  /** Is this operation inside a transaction? */
+  inTransaction?: boolean
+  /** Schema cache/load operation should go to primary. */
+  isSchemaLoad?: boolean
+  /** The operation is a volatile RPC - must go primary. */
+  isVolatileRpc?: boolean
+  /** LISTEN/NOTIFY must go to primary. */
+  isListenNotify?: boolean
+}
+
 export interface Executor {
-  query(text: string, values?: unknown[]): Promise<QueryResult>
+  query(text: string, values?: unknown[], ctx?: RouteContext): Promise<QueryResult>
   transaction<T>(fn: (tx: Executor) => Promise<T>, options?: TransactionOptions): Promise<T>
   /**
    * Optional: run a statement that can be cancelled via an `AbortSignal`,
@@ -35,9 +50,14 @@ export interface Executor {
   queryWithSignal?(
     text: string,
     values: unknown[] | undefined,
-    signal: AbortSignal
+    signal: AbortSignal,
+    ctx?: RouteContext
   ): Promise<QueryResult>
-  stream?(text: string, values?: unknown[]): AsyncGenerator<Record<string, unknown>>
+  stream?(
+    text: string,
+    values?: unknown[],
+    ctx?: RouteContext
+  ): AsyncGenerator<Record<string, unknown>>
 }
 
 /** Wraps a value thrown to force a rollback while still returning the value. */

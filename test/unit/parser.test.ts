@@ -71,6 +71,19 @@ describe('parseFilters', () => {
     expect(filters[0]).toMatchObject({ kind: 'or' })
   })
 
+  it('keeps commas inside range and array literals when splitting or()', () => {
+    const ranged = parseFilters(new URLSearchParams('or=(rng.adj.[5,7),task.neq.null)'))
+    expect(ranged.filters[0]).toMatchObject({ kind: 'or' })
+    const tree = ranged.filters[0] as { nodes: Array<{ operator?: string; value?: string }> }
+    expect(tree.nodes.map((n) => n.operator)).toEqual(['adj', 'neq'])
+    expect(tree.nodes[0]!.value).toBe('[5,7)')
+
+    const arrayed = parseFilters(new URLSearchParams('or=(tags.cs.{a,b},id.gt.1)'))
+    const atree = arrayed.filters[0] as { nodes: Array<{ operator?: string; value?: string }> }
+    expect(atree.nodes.map((n) => n.operator)).toEqual(['cs', 'gt'])
+    expect(atree.nodes[0]!.value).toBe('{a,b}')
+  })
+
   it('rejects unknown operators', () => {
     expect(() => parseFilters(new URLSearchParams('a=bogus.1'))).toThrow()
   })

@@ -35,5 +35,7 @@ connecting role. In particular:
 ## Dependency and supply-chain practices
 
 - Minimal runtime dependencies; the lockfile is committed.
-- Releases are published from CI with `npm publish --provenance`.
+- Releases are published from CI using npm **trusted publishing** (OIDC): the release job exchanges a
+  short-lived GitHub Actions identity token (`id-token: write`) for a publish credential, and npm
+  generates a **provenance attestation** for every tarball. No long-lived npm token is stored.
 - `SECURITY.md` provides the private disclosure address above.

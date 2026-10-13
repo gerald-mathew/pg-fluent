@@ -1,22 +1,14 @@
-import { type Executor, type QueryResult, type TransactionOptions } from '../exec/executor.js'
+import {
+  type Executor,
+  type QueryResult,
+  type RouteContext,
+  type TransactionOptions,
+} from '../exec/executor.js'
 import { PgFluentError } from '../errors/index.js'
 
-export type Route = 'primary' | 'replica'
+export type { RouteContext } from '../exec/executor.js'
 
-export interface RouteContext {
-  /** Force primary for this operation (e.g. .primary(), transaction, etc.). */
-  forcePrimary?: boolean
-  /** Treat as a mutation/write. */
-  isWrite?: boolean
-  /** Is this operation inside a transaction? */
-  inTransaction?: boolean
-  /** Schema cache/load operation should go to primary. */
-  isSchemaLoad?: boolean
-  /** The operation is volatile RPC - must go primary. */
-  isVolatileRpc?: boolean
-  /** LISTEN/NOTIFY must go to primary. */
-  isListenNotify?: boolean
-}
+export type Route = 'primary' | 'replica'
 
 export interface RoutingExecutorOptions {
   primary: Executor
@@ -85,8 +77,8 @@ export class RoutingExecutor implements Executor {
     return this.primary
   }
 
-  async query(text: string, values?: unknown[]): Promise<QueryResult> {
-    const exec = this.choose()
+  async query(text: string, values?: unknown[], ctx?: RouteContext): Promise<QueryResult> {
+    const exec = this.choose(ctx)
     try {
       return await exec.query(text, values)
     } catch (err) {
@@ -102,9 +94,10 @@ export class RoutingExecutor implements Executor {
   async queryWithSignal(
     text: string,
     values: unknown[] | undefined,
-    signal: AbortSignal
+    signal: AbortSignal,
+    ctx?: RouteContext
   ): Promise<QueryResult> {
-    const exec = this.choose()
+    const exec = this.choose(ctx)
     try {
       if (exec.queryWithSignal) return exec.queryWithSignal(text, values, signal)
       return exec.query(text, values)
@@ -123,8 +116,12 @@ export class RoutingExecutor implements Executor {
     return this.primary.transaction(fn, options)
   }
 
-  async *stream(text: string, values?: unknown[]): AsyncGenerator<Record<string, unknown>> {
-    const exec = this.choose()
+  async *stream(
+    text: string,
+    values?: unknown[],
+    ctx?: RouteContext
+  ): AsyncGenerator<Record<string, unknown>> {
+    const exec = this.choose(ctx)
     if (!exec.stream) {
       throw new PgFluentError(
         'PGFLUENT_NOT_IMPLEMENTED',

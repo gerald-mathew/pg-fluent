@@ -21,6 +21,7 @@ import type { RouteContext } from './connections/router.js'
 import { assertChannel, ListenManager } from './listen/manager.js'
 import type { ListenMeta, ListenOptions, ListenSubscription } from './listen/manager.js'
 import { runCopy, type CopyFromOptions } from './copy/copy.js'
+import { PRIMARY_HEADER } from './extensions/constants.js'
 
 export type { RetryConfig } from './exec/retry.js'
 export type { ConnectionConfig, SingleConnectionConfig, RoutedConnectionConfig } from './connections/types.js'
@@ -149,9 +150,17 @@ interface BuiltOptions {
   getNamedClient?: (name: string) => PgFluentClient<any> | undefined
   /** LISTEN/NOTIFY manager (top-level clients only). */
   listener?: ListenManager
+  /** Pin this client's requests to the primary (client-level `.primary()`). */
+  forcePrimary?: boolean
+  /** Derived view client: `close()` is a no-op; shares the parent's pools. */
+  view?: boolean
 }
 
-function buildPoolForSingle(config: SingleConnectionConfig, statementTimeoutDefault: number | null): { pool: pg.Pool; owned: boolean } {
+function buildPoolForSingle(
+  config: SingleConnectionConfig,
+  statementTimeoutDefault: number | null,
+  onIdleError?: (err: unknown) => void
+): { pool: pg.Pool; owned: boolean } {
   if (config.pool instanceof pg.Pool) {
     return { pool: config.pool, owned: false }
   }
@@ -170,7 +179,11 @@ function buildPoolForSingle(config: SingleConnectionConfig, statementTimeoutDefa
   const timeout = config.statementTimeoutMs === undefined ? statementTimeoutDefault : config.statementTimeoutMs
   if (timeout !== null) poolConfig.statement_timeout = timeout
 
-  return { pool: new pg.Pool(poolConfig), owned: true }
+  const pool = new pg.Pool(poolConfig)
+  // Idle-client errors otherwise become uncaught 'error' events that crash the process.
+  if (onIdleError !== undefined) pool.on('error', onIdleError)
+
+  return { pool, owned: true }
 }
 
 function buildClient<Database>(
@@ -178,27 +191,30 @@ function buildClient<Database>(
   pool: pg.Pool,
   owned: boolean,
   ownedPools: pg.Pool[] | undefined,
-  options: BuiltOptions
+  options: BuiltOptions,
+  existingFetchAdapter?: typeof fetch
 ): PgFluentClient<Database> {
   installExtensions()
 
-  const fetchAdapter = createFetchAdapter({
-    executor,
-    schemas: options.schemas,
-    defaultSchema: options.defaultSchema,
-    maxRows: options.maxRows,
-    allowUnfilteredMutations: options.allowUnfilteredMutations,
-    retries: options.retries,
-    instrument: options.instrument,
-    getRouteContext: (req) => {
-      const ctx: RouteContext = {
-        forcePrimary: req.forcePrimary,
-        isWrite: req.method === 'POST' || req.method === 'PATCH' || req.method === 'DELETE',
-        isVolatileRpc: req.resource.kind === 'rpc',
-      }
-      return ctx
-    },
-  })
+  const fetchAdapter =
+    existingFetchAdapter ??
+    createFetchAdapter({
+      executor,
+      schemas: options.schemas,
+      defaultSchema: options.defaultSchema,
+      maxRows: options.maxRows,
+      allowUnfilteredMutations: options.allowUnfilteredMutations,
+      retries: options.retries,
+      instrument: options.instrument,
+      getRouteContext: (req) => {
+        const ctx: RouteContext = {
+          forcePrimary: req.forcePrimary,
+          isWrite: req.method === 'POST' || req.method === 'PATCH' || req.method === 'DELETE',
+          isVolatileRpc: req.resource.kind === 'rpc',
+        }
+        return ctx
+      },
+    })
 
   const rest = new PostgrestClient<Database, ClientOptionsFor<Database>>(
     'http://pg-fluent.local',
@@ -208,6 +224,14 @@ function buildClient<Database>(
       retry: false,
     }
   )
+
+  if (options.forcePrimary) {
+    try {
+      (rest as any).headers?.set?.(PRIMARY_HEADER, '1')
+    } catch {
+      // The headers container is opaque; the builder-level `.primary()` still works.
+    }
+  }
 
   let closed = false
   const runTransaction = async <T>(
@@ -233,14 +257,19 @@ function buildClient<Database>(
     async close(closeOptions?: { timeoutMs?: number }): Promise<void> {
       if (closed) return
       closed = true
-      if (!owned && !(ownedPools && ownedPools.length > 0)) return
+      // Derived view clients share the parent's pools and listener; closing a view must not
+      // tear them down while the parent remains in use.
+      if (options.view) return
+      const pools = new Set<pg.Pool>()
+      if (owned) pools.add(pool)
+      for (const p of ownedPools ?? []) pools.add(p)
+      const tasks: Promise<unknown>[] = []
+      if (options.listener) tasks.push(options.listener.stop())
+      for (const p of pools) tasks.push(p.end())
+      if (tasks.length === 0) return
       const timeoutMs = closeOptions?.timeoutMs
       if (timeoutMs === undefined) {
-        await options.listener?.stop()
-        if (owned) await pool.end()
-        if (ownedPools) {
-          await Promise.allSettled(ownedPools.map((p) => p.end()))
-        }
+        await Promise.allSettled(tasks)
         return
       }
       let timer: ReturnType<typeof setTimeout> | undefined
@@ -258,10 +287,6 @@ function buildClient<Database>(
         timer.unref?.()
       })
       try {
-        const tasks = []
-        if (options.listener) tasks.push(options.listener.stop())
-        if (owned) tasks.push(pool.end())
-        if (ownedPools) tasks.push(...ownedPools.map((p) => p.end()))
         await Promise.race([Promise.allSettled(tasks).then(() => undefined), guard])
       } finally {
         if (timer !== undefined) clearTimeout(timer)
@@ -283,11 +308,16 @@ function buildClient<Database>(
       return c as any
     },
     primary(): PgFluentClient<Database> {
-      const hdr = (rest as any).headers ?? new Headers()
-      try {
-        if (typeof hdr.set === 'function') hdr.set('x-pgfluent-primary', '1')
-      } catch {}
-      return this as any
+      // Return a derived client whose requests carry the primary header, instead of
+      // permanently mutating the shared header set of this client.
+      return buildClient<Database>(
+        executor,
+        pool,
+        false,
+        undefined,
+        { ...options, forcePrimary: true, view: true, listener: options.listener },
+        fetchAdapter
+      )
     },
     refreshSchema(): void {
       const schemaCache = (fetchAdapter as any)?._schemaCache
@@ -371,26 +401,35 @@ export function createClient<Database = any>(config: PgFluentConfig = {}): PgFlu
       telemetry: cfg.telemetry,
     })
 
+    // Idle pooled-client errors otherwise surface as uncaught 'error' events.
+    const onIdleError = (err: unknown): void => {
+      cfg.logger?.error?.('pg-fluent: pooled client errored', {
+        code: (err as { code?: unknown } | null)?.code,
+        message: String((err as { message?: unknown } | null)?.message ?? err),
+      })
+    }
+
     let bundle
     if (config.connections && config.connections[name]) {
       bundle = (function () {
         const c = config.connections![name]!
         if (isRouted(c)) {
           const routed = c as RoutedConnectionConfig
-          const primary = buildPoolForSingle(routed.primary, statementTimeoutDefault)
+          const primary = buildPoolForSingle(routed.primary, statementTimeoutDefault, onIdleError)
           const replicas: Executor[] = []
           const ownedPoolsArr: pg.Pool[] = []
-          if (primary.owned) ownedPoolsArr.push(primary.pool)
           for (const rep of routed.replicas ?? []) {
-            const sp2 = buildPoolForSingle(rep, statementTimeoutDefault)
+            const sp2 = buildPoolForSingle(rep, statementTimeoutDefault, onIdleError)
             replicas.push(new PgExecutor(sp2.pool))
             if (sp2.owned) ownedPoolsArr.push(sp2.pool)
           }
           const executor = new RoutingExecutor({ primary: new PgExecutor(primary.pool), replicas })
+          // `ownedPools` holds only pools beyond the primary one; `close()` ends the primary
+          // via `owned` and the rest via `ownedPools` (no double `end()`).
           return { executor, pool: primary.pool, owned: primary.owned, ownedPools: ownedPoolsArr }
         }
-        const sp = buildPoolForSingle(c as SingleConnectionConfig, statementTimeoutDefault)
-        return { executor: new PgExecutor(sp.pool), pool: sp.pool, owned: sp.owned, ownedPools: sp.owned ? [sp.pool] : [] }
+        const sp = buildPoolForSingle(c as SingleConnectionConfig, statementTimeoutDefault, onIdleError)
+        return { executor: new PgExecutor(sp.pool), pool: sp.pool, owned: sp.owned, ownedPools: [] }
       })()
     } else {
       const base: SingleConnectionConfig = {
@@ -404,8 +443,8 @@ export function createClient<Database = any>(config: PgFluentConfig = {}): PgFlu
         pool: cfg.pool,
         statementTimeoutMs: cfg.statementTimeoutMs,
       }
-      const sp = buildPoolForSingle(base, statementTimeoutDefault)
-      bundle = { executor: new PgExecutor(sp.pool), pool: sp.pool, owned: sp.owned, ownedPools: sp.owned ? [sp.pool] : [] }
+      const sp = buildPoolForSingle(base, statementTimeoutDefault, onIdleError)
+      bundle = { executor: new PgExecutor(sp.pool), pool: sp.pool, owned: sp.owned, ownedPools: [] }
     }
 
   return buildClient<Database>(bundle.executor, bundle.pool, bundle.owned, bundle.ownedPools, {

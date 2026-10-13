@@ -17,7 +17,10 @@ function invalid(message: string): PgFluentError {
 
 /**
  * Render a column reference qualified by `alias`, applying JSON access steps.
- * JSON keys are bound as parameters (never concatenated) and cast to `text`.
+ * The base column is wrapped in `to_jsonb(...)` so that access works for both
+ * `json`/`jsonb` columns and scalar columns (e.g. a `text[]`). Numeric keys are
+ * treated as array indices (`->0`); all other keys are bound as parameters
+ * (never concatenated) and cast to `text`.
  */
 export function renderColumn(
   alias: string,
@@ -25,9 +28,11 @@ export function renderColumn(
   steps: ReadonlyArray<{ op: '->' | '->>'; key: string }>,
   bag: ParamBag
 ): string {
-  let sql = `${alias}.${quoteIdent(base)}`
+  if (steps.length === 0) return `${alias}.${quoteIdent(base)}`
+  let sql = `to_jsonb(${alias}.${quoteIdent(base)})`
   for (const step of steps) {
-    sql += `${step.op}(${bag.add(step.key)}::text)`
+    if (/^\d+$/.test(step.key)) sql += `${step.op}${step.key}`
+    else sql += `${step.op}(${bag.add(step.key)}::text)`
   }
   return sql
 }
