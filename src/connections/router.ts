@@ -1,8 +1,5 @@
-import type { Pool, PoolClient } from 'pg'
-import { PgExecutor, type Executor, type QueryResult, type TransactionOptions } from '../exec/executor.js'
+import { type Executor, type QueryResult, type TransactionOptions } from '../exec/executor.js'
 import { PgFluentError } from '../errors/index.js'
-import type { ConnectionConfig, ReplicaConfig, RoutedConnectionConfig, SingleConnectionConfig } from './types.js'
-import { isRouted } from './types.js'
 
 export type Route = 'primary' | 'replica'
 

@@ -15,7 +15,7 @@ export interface SingleConnectionConfig {
   replicas?: ReplicaConfig[]
 }
 
-export interface ReplicaConfig extends Omit<SingleConnectionConfig, 'replicas'> {}
+export type ReplicaConfig = Omit<SingleConnectionConfig, 'replicas'>
 
 export interface RoutedConnectionConfig {
   primary: SingleConnectionConfig

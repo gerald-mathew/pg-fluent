@@ -125,7 +125,7 @@ export class ListenManager {
     }
   }
 
-  on<T>(event: ListenEvent, handler: (payload?: unknown) => void): void {
+  on(event: ListenEvent, handler: (payload?: unknown) => void): void {
     let set = this.eventHandlers.get(event)
     if (!set) {
       set = new Set()

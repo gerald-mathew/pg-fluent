@@ -179,6 +179,8 @@ const RESERVED = new Set([
   'and',
 ])
 
+const FILTER_GUARDED_KEYS = new Set(['select', 'on_conflict', 'columns'])
+
 const EMBEDDED_SUFFIX = /\.(order|limit|offset|or|and)$/
 
 /**
@@ -212,7 +214,15 @@ export function parseFilters(params: URLSearchParams): ParsedFilters {
       })
       continue
     }
-    if (RESERVED.has(key)) continue
+    if (RESERVED.has(key)) {
+      // `select`, `on_conflict` and `columns` are not filters. If one of them carries a filter
+      // value (e.g. `.eq('select', 1)` arrives as `select=eq.1`) a column is being filtered by a
+      // reserved name; reject instead of silently dropping the filter.
+      if (FILTER_GUARDED_KEYS.has(key) && looksLikeFilterValue(value)) {
+        throw parseError(`'${key}' is a reserved parameter name and cannot be used as a filter column`)
+      }
+      continue
+    }
     if (EMBEDDED_SUFFIX.test(key) || key.includes('.')) {
       embedded.push({ key, value })
       continue

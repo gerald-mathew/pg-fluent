@@ -15,7 +15,7 @@ export function toCsvField(value: CsvValue): string {
 
 /** Serialize JSON row objects to PostgREST-style CSV. */
 export function toCsv(rows: Record<string, CsvValue>[], columns?: string[]): string {
-  let header = columns ? [...columns] : []
+  const header = columns ? [...columns] : []
   if (!columns) {
     const seen = new Set<string>()
     for (const row of rows) {

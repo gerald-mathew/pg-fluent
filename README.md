@@ -154,6 +154,11 @@ await db.from('posts').select('id, ...users(name)')       // spread a to-one rel
 await db.from('users').select('id, posts(title)').order('posts.title')
 ```
 
+A dotted filter or embedded modifier (`posts.title=eq.x`) requires the embed to be present in
+`select()`. If it is not, the request is rejected with `PGRST100` and a hint to fix it. PostgREST
+(>= v16) also rejects the request with a 400, so pg-fluent matches it rather than silently dropping
+the filter — a dropped filter can turn a scoped read into a full-table read.
+
 Embedding **views** is not supported in v1.
 
 ## Writes
@@ -368,6 +373,7 @@ What differs from Supabase/PostgREST:
 | Auth / storage / edge functions | Not provided |
 | RLS / roles | Runs as the connecting role; Supabase role policies do not apply |
 | Views | Readable; **embedding views is unsupported** in v1 |
+| Reserved filter names | A value that parses as a filter on a reserved parameter (`columns=eq.1`, `select=eq.1`, `on_conflict=neq.1`) is rejected with `PGFLUENT_INVALID_QUERY` instead of being silently ignored (which would return unfiltered rows) |
 | Streaming | Native `.stream()` (no HTTP chunking) |
 | Extras | `.toSQL()`, safe mutations, COPY, LISTEN, named connections, replicas |
 

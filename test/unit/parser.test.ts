@@ -125,3 +125,26 @@ describe('parseRequest', () => {
     expect(errorCode(() => req('todos', { method: 'POST', body: '{not json' }))).toBe('PGRST102')
   })
 })
+
+describe('dropped-filter guards', () => {
+  it('rejects a dotted filter whose embed is not selected', () => {
+    expect(errorCode(() => req('users?select=*&a.b=eq.1'))).toBe('PGRST100')
+    expect(errorCode(() => req('users?select=id&posts.limit=5'))).toBe('PGRST100')
+  })
+
+  it('accepts a dotted filter when the embed is selected (by name or alias)', () => {
+    expect(errorCode(() => req('users?select=id,posts(id)&posts.id=eq.1'))).toBeUndefined()
+    expect(errorCode(() => req('users?select=id,p:posts(id)&p.id=eq.1'))).toBeUndefined()
+    expect(errorCode(() => req('users?select=id,posts(id,comments(id))&posts.comments.id=eq.1'))).toBeUndefined()
+  })
+
+  it('rejects reserved parameter names used as filter columns', () => {
+    expect(errorCode(() => req('users?select=eq.1'))).toBe('PGFLUENT_INVALID_QUERY')
+    expect(errorCode(() => req('users?columns=eq.1'))).toBe('PGFLUENT_INVALID_QUERY')
+    expect(errorCode(() => req('users?on_conflict=neq.1'))).toBe('PGFLUENT_INVALID_QUERY')
+  })
+
+  it('still accepts normal select/columns/on_conflict values', () => {
+    expect(errorCode(() => req('users?select=id,name&columns=id,name&on_conflict=id'))).toBeUndefined()
+  })
+})

@@ -114,6 +114,15 @@ function classifyEmbeddedParam(key: string, value: string): EmbeddedParam {
   return { path, kind: 'filter', key: last, value }
 }
 
+/** True when `path` (embed aliases) names a chain of embeds present in `items`. */
+function embedPathExists(items: SelectItem[], path: string[]): boolean {
+  if (path.length === 0) return true
+  const [head, ...rest] = path
+  return items.some(
+    (item) => item.kind === 'embed' && item.alias === head && embedPathExists(item.columns, rest)
+  )
+}
+
 function decodeSegment(segment: string): string {
   try {
     return decodeURIComponent(segment)
@@ -164,6 +173,20 @@ export function parseRequest(raw: RawRequest, ctx: RequestParseContext): ParsedR
   }
 
   const select: SelectItem[] = parseSelect(params.get('select') ?? undefined)
+
+  // A dotted filter/modifier (`posts.title=eq.x`, `posts.limit=5`) targets an embedded resource.
+  // If that embed is not in `select`, rejecting is safer than silently dropping the filter,
+  // which would return unfiltered rows.
+  for (const e of embedded) {
+    if (!embedPathExists(select, e.path)) {
+      throw pgrstError(
+        'PGRST100',
+        `Filter or modifier on '${[...e.path, e.key].filter((p) => p !== '').join('.')}' refers to an embedded resource that is not in select`,
+        { details: 'Add the embedded resource to select(), or remove the dotted filter/modifier.' }
+      )
+    }
+  }
+
   const order = parseOrder(params.get('order') ?? '')
   const limit = parseNumber(params.get('limit'), 'limit')
   const offset = parseNumber(params.get('offset'), 'offset')

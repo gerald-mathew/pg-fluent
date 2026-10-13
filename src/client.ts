@@ -126,7 +126,6 @@ type ClientOptionsFor<Database> = 0 extends 1 & Database
     ? I
     : { PostgrestVersion: '13' }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type PgFluentClient<Database = any> = PostgrestClient<
   Database,
   ClientOptionsFor<Database>
@@ -172,22 +171,6 @@ function buildPoolForSingle(config: SingleConnectionConfig, statementTimeoutDefa
   if (timeout !== null) poolConfig.statement_timeout = timeout
 
   return { pool: new pg.Pool(poolConfig), owned: true }
-}
-
-function buildPool(config: PgFluentConfig): { pool: pg.Pool; owned: boolean } {
-  // For backward compat when connections not used
-  const base: SingleConnectionConfig = {
-    connectionString: config.connectionString,
-    host: config.host,
-    port: config.port,
-    database: config.database,
-    user: config.user,
-    password: config.password,
-    ssl: config.ssl,
-    pool: config.pool,
-    statementTimeoutMs: config.statementTimeoutMs,
-  }
-  return buildPoolForSingle(base, config.statementTimeoutMs === undefined ? DEFAULT_STATEMENT_TIMEOUT_MS : config.statementTimeoutMs)
 }
 
 function buildClient<Database>(

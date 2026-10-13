@@ -26,7 +26,7 @@ jobs:
       - run: npm run typecheck
 
   unit:
-    name: unit / golden / security
+    name: unit
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -70,6 +70,47 @@ jobs:
       - run: npm ci
       - run: npm test
 
+  differential:
+    name: differential (postgrest v16.4)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: pgfluent
+          POSTGRES_PASSWORD: pgfluent
+          POSTGRES_DB: pgfluent_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U pgfluent -d pgfluent_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      # PostgREST is pointed at the `pf_diff` schema, which the test fixture
+      # creates at runtime; the fixture issues `NOTIFY pgrst, 'reload schema'`
+      # and the test polls until the server has picked the schema up.
+      postgrest:
+        image: postgrest/postgrest:v16.4
+        env:
+          PGRST_DB_URI: postgres://pgfluent:pgfluent@postgres:5432/pgfluent_test
+          PGRST_DB_SCHEMAS: pf_diff
+          PGRST_DB_ANON_ROLE: pgfluent
+          PGRST_SERVER_PORT: 3000
+        ports:
+          - 3000:3000
+    env:
+      PGFLUENT_TEST_URL: postgres://pgfluent:pgfluent@127.0.0.1:5432/pgfluent_test
+      PGFLUENT_POSTGREST_URL: http://127.0.0.1:3000
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run test:differential
+
   package:
     name: build & package check
     runs-on: ubuntu-latest
@@ -98,8 +139,8 @@ jobs:
           node-version: 22
           cache: npm
           registry-url: https://registry.npmjs.org
+      # npm >= 11.5.1 is required for OIDC trusted publishing.
+      - run: npm install -g npm@^11.5.1
       - run: npm ci
       - run: npm run build
-      - run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - run: npm publish --access public

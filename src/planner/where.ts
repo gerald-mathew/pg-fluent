@@ -147,7 +147,7 @@ function joinCondition(
   rel: ResolvedRelationship,
   baseAlias: string,
   subAlias: string,
-  bag: ParamBag
+  _bag: ParamBag
 ): string {
   const conditions: string[] = []
   for (let i = 0; i < rel.baseColumns.length; i++) {
