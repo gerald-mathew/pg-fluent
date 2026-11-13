@@ -16,6 +16,15 @@ export interface SqlPlan {
   values: unknown[]
 }
 
+/** Options for `.toSQL()`. */
+export interface ToSqlOptions {
+  /**
+   * `executable` (default): SQL that returns the JSON response envelope.
+   * `data`: plain row-returning SQL without the JSON wrapper.
+   */
+  shape?: 'executable' | 'data'
+}
+
 /** Row type streamed by `.stream()`. */
 export type StreamRow = Record<string, unknown>
 
@@ -213,7 +222,7 @@ function planErrorBody(payload: PlanErrorBody | null, status: number): Error & {
   return error
 }
 
-async function toSQL(this: InternalBuilder): Promise<SqlPlan> {
+async function toSQL(this: InternalBuilder, options?: ToSqlOptions): Promise<SqlPlan> {
   const headers: Record<string, string> = {}
   this.headers.forEach((value, key) => {
     headers[key] = value
@@ -240,18 +249,22 @@ async function toSQL(this: InternalBuilder): Promise<SqlPlan> {
   })
 
   const payload = (await response.json().catch(() => null)) as
-    | ({ text?: unknown; values?: unknown } & PlanErrorBody)
+    | ({ text?: unknown; values?: unknown; dataText?: unknown } & PlanErrorBody)
     | null
 
   if (!response.ok) throw planErrorBody(payload, response.status)
   if (payload === null || typeof payload.text !== 'string') {
     throw new PgFluentError('PGFLUENT_INTERNAL', 'Adapter returned an invalid plan response')
   }
-  return { text: payload.text, values: Array.isArray(payload.values) ? payload.values : [] }
+  const text =
+    options?.shape === 'data' && typeof payload.dataText === 'string'
+      ? payload.dataText
+      : payload.text
+  return { text, values: Array.isArray(payload.values) ? payload.values : [] }
 }
 
 interface ExtensionProto {
-  toSQL?: () => Promise<SqlPlan>
+  toSQL?: (options?: ToSqlOptions) => Promise<SqlPlan>
   allowUnfiltered?: () => unknown
   timeout?: (ms: number) => unknown
   primary?: () => unknown
@@ -265,15 +278,15 @@ export function installExtensions(): void {
   if (installed) return
   installed = true
   const proto = PostgrestBuilder.prototype as unknown as ExtensionProto
-  proto.toSQL = function (this: InternalBuilder): Promise<SqlPlan> {
-    return toSQL.call(this)
+  proto.toSQL = function (this: InternalBuilder, options?: ToSqlOptions): Promise<SqlPlan> {
+    return toSQL.call(this, options)
   }
   proto.allowUnfiltered = function (this: InternalBuilder): unknown {
     this.headers.set(ALLOW_UNFILTERED_HEADER, '1')
     return this
   }
   proto.timeout = function (this: InternalBuilder, ms: number): unknown {
-    if (!Number.isInteger(ms) || ms <= 0) {
+    if (!Number.isSafeInteger(ms) || ms <= 0) {
       throw new PgFluentError(
         'PGFLUENT_INVALID_QUERY',
         `Timeout must be a positive integer number of milliseconds, received ${String(ms)}`
@@ -300,9 +313,11 @@ declare module '@supabase/postgrest-js' {
     /**
      * Render this request to `{ text, values }` without executing it.
      *
-     * Values are returned as-is; callers decide whether to log them.
+     * Pass `{ shape: 'data' }` to get plain row-returning SQL without the JSON
+     * response envelope. Values are returned as-is; callers decide whether to
+     * log them.
      */
-    toSQL(): Promise<SqlPlan>
+    toSQL(options?: ToSqlOptions): Promise<SqlPlan>
 
     /**
      * Permit this mutation to run without a filter, overriding the client's

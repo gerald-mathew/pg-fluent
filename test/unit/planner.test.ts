@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { parseRequest } from '../../src/parser/request.js'
 import { parseFilters } from '../../src/parser/filter.js'
-import { planRead } from '../../src/planner/read.js'
+import { planRead, planStream } from '../../src/planner/read.js'
 import { planWrite } from '../../src/planner/write.js'
 import { renderWhere } from '../../src/planner/where.js'
 import { ParamBag } from '../../src/sql/builder.js'
@@ -45,9 +45,119 @@ describe('planRead', () => {
     expect(p.values).toEqual(['false'])
   })
 
+  it('filters the table directly for a plain read (no CTE)', () => {
+    const { read } = plan('todos?select=id,task,done&done=eq.false&order=id&limit=10')
+    const p = read()
+    expect(p.text).not.toContain('pgfl_filtered')
+    expect(p.text).toContain('FROM "public"."todos" AS "pgfl_base"')
+    expect(p.text).toContain('WHERE "pgfl_base"."done" = $1')
+    expect(p.values).toEqual(['false'])
+  })
+
+  it('filters the table directly when streaming (no CTE)', () => {
+    const { req } = plan('todos?select=id&done=eq.false')
+    const p = planStream(req, { maxRows: 1000 })
+    expect(p.text).not.toContain('pgfl_filtered')
+    expect(p.text).toContain('FROM "public"."todos" AS "pgfl_base"')
+    expect(p.text).toContain('WHERE "pgfl_base"."done" = $1')
+    expect(p.values).toEqual(['false'])
+  })
+
+  it('omits WHERE when there are no filters', () => {
+    const { read } = plan('todos?select=id&limit=3')
+    expect(read().text).not.toContain('WHERE')
+  })
+
+  it('keeps a non-materialized CTE for an exact count', () => {
+    const { read } = plan('todos?select=id&done=eq.true', 'GET', undefined, { prefer: 'count=exact' })
+    expect(read().text).toContain('"pgfl_filtered" AS NOT MATERIALIZED')
+  })
+
   it('adds an exact count column over the filtered set', () => {
     const { read } = plan('todos?select=id&done=eq.true', 'GET', undefined, { prefer: 'count=exact' })
     expect(read().text).toContain('__pgfl_count')
+  })
+
+  it('builds a planner-estimate query for count=planned', () => {
+    const { read } = plan('todos?select=id&done=eq.false', 'GET', undefined, {
+      prefer: 'count=planned',
+    })
+    const p = read()
+    expect(p.countText).toBeUndefined()
+    expect(p.countPlanText).toContain('SELECT 1 FROM "public"."todos" AS "pgfl_src"')
+    expect(p.countPlanText).toContain('"pgfl_src"."done" = $1')
+    expect(p.countValues).toEqual(['false'])
+    expect(p.text).not.toContain('count(*)')
+  })
+
+  it('bounds count=estimated to maxRows + 1', () => {
+    const req = parseRequest(
+      {
+        url: 'http://x/todos?select=id&done=eq.false',
+        method: 'GET',
+        headers: { prefer: 'count=estimated' },
+      },
+      ctx
+    )
+    const p = planRead(req, { maxRows: 10 })
+    expect(p.countText).toContain('LIMIT 11')
+    expect(p.countPlanText).toContain('SELECT 1')
+  })
+
+  it('uses an unbounded exact count for estimated when maxRows is infinite', () => {
+    const req = parseRequest(
+      {
+        url: 'http://x/todos?select=id&done=eq.false',
+        method: 'GET',
+        headers: { prefer: 'count=estimated' },
+      },
+      ctx
+    )
+    expect(planRead(req, { maxRows: Infinity }).countText).not.toContain('LIMIT')
+  })
+
+  it('includes top-level !inner conditions in the count query', () => {
+    const req = parseRequest(
+      {
+        url: 'http://x/users?select=name,posts!inner(title)&posts.title=eq.hello',
+        method: 'GET',
+        headers: { prefer: 'count=planned' },
+      },
+      ctx
+    )
+    const embed = req.select.find((item) => item.kind === 'embed')
+    if (!embed || embed.kind !== 'embed') throw new Error('expected an embed')
+    const rel = {
+      kind: 'to-many' as const,
+      table: { schema: 'public', name: 'posts' },
+      baseColumns: ['id'],
+      relationColumns: ['user_id'],
+    }
+    embed.relationship = rel
+    req.filterRelationships = new Map([['posts', rel]])
+    const p = planRead(req, { maxRows: 1000 })
+    expect(p.countPlanText).toContain('EXISTS')
+    expect(p.countPlanText).toContain('"pgfl_src"."id"')
+  })
+
+  it('exposes data SQL without the JSON wrapper', () => {
+    const { read } = plan('todos?select=id,task&done=eq.false&order=id&limit=5')
+    const p = read()
+    expect(p.dataText).toBeDefined()
+    expect(p.dataText).not.toContain('json_agg')
+    expect(p.dataText).not.toContain('row_to_json')
+    expect(p.dataText).toContain('FROM "public"."todos" AS "pgfl_base"')
+    expect(p.dataText).toContain('WHERE "pgfl_base"."done" = $1')
+    expect(p.dataText).toContain('LIMIT 5')
+  })
+
+  it('keeps the CTE in data SQL when the read needs one', () => {
+    const { read } = plan('todos?select=id&done=eq.true', 'GET', undefined, {
+      prefer: 'count=exact',
+    })
+    const p = read()
+    expect(p.dataText).toContain('WITH "pgfl_filtered" AS NOT MATERIALIZED')
+    expect(p.dataText).not.toContain('__pgfl_count')
   })
 
   it('clamps the limit to maxRows', () => {

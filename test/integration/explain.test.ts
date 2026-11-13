@@ -21,6 +21,11 @@ describe.skipIf(!available)('explain', () => {
     expect(data as string).toContain('pf_todos')
   })
 
+  it('does not scan the filter CTE for a plain read', async () => {
+    const { data } = await db.from('pf_todos').select('id').eq('done', false).explain()
+    expect(data as string).not.toContain('CTE Scan')
+  })
+
   it('analyzes and executes the query', async () => {
     const { data } = await db.from('pf_todos').select('id').explain({ analyze: true, buffers: true })
     expect(data as string).toMatch(/actual time|never executed/)

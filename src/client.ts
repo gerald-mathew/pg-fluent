@@ -387,6 +387,12 @@ export function createClient<Database = any>(config: PgFluentConfig = {}): PgFlu
   const schemas = config.schemas && config.schemas.length > 0 ? config.schemas : ['public']
   const defaultSchema = schemas[0]!
   const maxRows = config.maxRows ?? DEFAULT_MAX_ROWS
+  if (maxRows !== Infinity && (!Number.isSafeInteger(maxRows) || maxRows < 0)) {
+    throw new PgFluentError(
+      'PGFLUENT_INVALID_QUERY',
+      `maxRows must be a non-negative integer or Infinity, received ${String(maxRows)}`
+    )
+  }
   const statementTimeoutDefault = config.statementTimeoutMs === undefined ? DEFAULT_STATEMENT_TIMEOUT_MS : config.statementTimeoutMs
 
   const namedClients = new Map<string, PgFluentClient<any>>()

@@ -8,7 +8,7 @@ export type {
 } from './observability/index.js'
 export { withRetry, isTransientError } from './exec/retry.js'
 export { installExtensions } from './extensions/to-sql.js'
-export type { SqlPlan } from './extensions/to-sql.js'
+export type { SqlPlan, ToSqlOptions } from './extensions/to-sql.js'
 export type { TransactionOptions } from './exec/executor.js'
 export { SqlQuery } from './raw/index.js'
 export type {

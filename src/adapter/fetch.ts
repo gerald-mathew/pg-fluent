@@ -1,5 +1,5 @@
 import { parseRequest, type RawRequest } from '../parser/request.js'
-import { planRead, planStream } from '../planner/read.js'
+import { planRead, planStream, type ReadPlan } from '../planner/read.js'
 import { buildReadResponse } from '../response/build.js'
 import { buildErrorResponse } from '../response/error.js'
 import { runAndRollback, type Executor, type QueryResult } from '../exec/executor.js'
@@ -186,29 +186,78 @@ async function executeStatement(
   )
 }
 
+async function countRows(
+  options: AdapterOptions,
+  req: ParsedRequest,
+  text: string,
+  values: unknown[]
+): Promise<number> {
+  const result = await executeStatement(options, req, text, values, true)
+  const raw = result.rows[0] ? Object.values(result.rows[0])[0] : undefined
+  const count = Number(raw)
+  if (!Number.isFinite(count)) {
+    throw new PgFluentError('PGFLUENT_INTERNAL', 'Count query returned an invalid result')
+  }
+  return count
+}
+
+async function estimateRows(
+  options: AdapterOptions,
+  req: ParsedRequest,
+  plan: ReadPlan
+): Promise<number> {
+  if (plan.countPlanText === undefined) {
+    throw new PgFluentError('PGFLUENT_INTERNAL', 'Missing planner query for count estimate')
+  }
+  const text = `EXPLAIN (FORMAT JSON) ${plan.countPlanText}`
+  const result = await executeStatement(options, req, text, plan.countValues ?? [], true)
+  const raw = result.rows[0]?.['QUERY PLAN']
+  let parsed: unknown = raw
+  if (typeof raw === 'string') {
+    try {
+      parsed = JSON.parse(raw)
+    } catch {
+      parsed = undefined
+    }
+  }
+  const rows = Number(
+    (parsed as Array<{ Plan?: Record<string, unknown> }> | undefined)?.[0]?.Plan?.['Plan Rows']
+  )
+  if (!Number.isFinite(rows)) {
+    throw new PgFluentError('PGFLUENT_INTERNAL', 'Could not read the planner row estimate')
+  }
+  return rows
+}
+
 async function resolveCount(
   options: AdapterOptions,
   req: ParsedRequest,
-  countText: string | undefined,
-  countValues: unknown[]
+  plan: ReadPlan
 ): Promise<number | undefined> {
-  if (countText === undefined) return undefined
-  try {
-    const result = await options.executor.query(
-      countText,
-      countValues,
-      options.getRouteContext?.(req)
-    )
-    const raw = result.rows[0] ? Object.values(result.rows[0])[0] : undefined
-    return raw === undefined || raw === null ? undefined : Number(raw)
-  } catch {
-    return undefined
+  // Scalar RPC plans have no secondary statement; preserve the previous
+  // behaviour of omitting the count rather than failing an otherwise valid read.
+  if (req.count === 'planned') {
+    if (plan.countPlanText === undefined) return undefined
+    return estimateRows(options, req, plan)
   }
+
+  if (req.count === 'estimated') {
+    if (plan.countText === undefined) return undefined
+    const exact = await countRows(options, req, plan.countText, plan.countValues ?? [])
+    if (options.maxRows === Infinity || exact <= options.maxRows) return exact
+    return Math.max(exact, await estimateRows(options, req, plan))
+  }
+
+  if (plan.countText !== undefined) {
+    return countRows(options, req, plan.countText, plan.countValues ?? [])
+  }
+  return undefined
 }
 
 interface RenderedPlan {
   text: string
   values: unknown[]
+  dataText?: string
 }
 
 /** Render the SQL for any request kind without executing it. */
@@ -218,16 +267,19 @@ async function buildPlan(
   schemaCache: SchemaCache
 ): Promise<RenderedPlan> {
   if (req.resource.kind === 'rpc') {
-    return planRpc(req, { maxRows: options.maxRows, schemaCache })
+    const plan = await planRpc(req, { maxRows: options.maxRows, schemaCache })
+    return { text: plan.text, values: plan.values, dataText: plan.dataText ?? plan.text }
   }
   if (req.method === 'GET' || req.method === 'HEAD') {
     await resolveRelationships(req, schemaCache)
-    return planRead(req, { maxRows: options.maxRows })
+    const plan = planRead(req, { maxRows: options.maxRows })
+    return { text: plan.text, values: plan.values, dataText: plan.dataText ?? plan.text }
   }
-  return planWrite(req, {
+  const plan = await planWrite(req, {
     allowUnfilteredMutations: options.allowUnfilteredMutations,
     schemaCache,
   })
+  return { text: plan.text, values: plan.values, dataText: plan.text }
 }
 
 async function planResponse(
@@ -237,10 +289,17 @@ async function planResponse(
 ): Promise<Response> {
   try {
     const plan = await buildPlan(req, options, schemaCache)
-    return new Response(JSON.stringify({ text: plan.text, values: plan.values }), {
-      status: 200,
-      headers: { 'Content-Type': 'application/json; charset=utf-8' },
-    })
+    return new Response(
+      JSON.stringify({
+        text: plan.text,
+        values: plan.values,
+        ...(plan.dataText !== undefined ? { dataText: plan.dataText } : {}),
+      }),
+      {
+        status: 200,
+        headers: { 'Content-Type': 'application/json; charset=utf-8' },
+      }
+    )
   } catch (err) {
     return buildErrorResponse(err)
   }
@@ -384,12 +443,7 @@ export function createFetchAdapter(options: AdapterOptions): typeof fetch {
           plan.values,
           req.method === 'GET'
         )
-        const countOverride = await resolveCount(
-          options,
-          req,
-          plan.countText,
-          plan.countValues ?? []
-        )
+        const countOverride = await resolveCount(options, req, plan)
         return buildReadResponse({
           plan,
           req,
@@ -419,12 +473,7 @@ export function createFetchAdapter(options: AdapterOptions): typeof fetch {
         }
         const plan = planRead(req, { maxRows: options.maxRows })
         const result = await executeStatement(options, req, plan.text, plan.values, true)
-        const countOverride = await resolveCount(
-          options,
-          req,
-          plan.countText,
-          plan.countValues ?? []
-        )
+        const countOverride = await resolveCount(options, req, plan)
         return buildReadResponse({
           plan,
           req,

@@ -1,6 +1,6 @@
 {
   "name": "pg-fluent",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Supabase-style fluent query API (postgrest-js) executed directly against PostgreSQL over the wire protocol.",
   "license": "MIT",
   "author": "Mathew Gerald <mathewgerald.14@gmail.com>",
@@ -48,6 +48,7 @@
     "test:coverage": "vitest run --coverage",
     "test:differential": "vitest run test/differential",
     "bench": "node bench/bench.mjs",
+    "bench:explain": "node bench/explain-count.mjs",
     "publint": "publint",
     "attw": "attw --pack .",
     "check:dist": "node scripts/check-dist.mjs",
@@ -84,7 +85,7 @@
     "publint": "^0.3.25",
     "tsup": "^9.0.0",
     "typescript": "npm:@typescript/typescript6@^6.0.2",
-    "typescript-eslint": "^8.72.1",
+    "typescript-eslint": "^8.72.2",
     "vitest": "^5.1.0"
   },
   "overrides": {
@@ -99,5 +100,8 @@
     "query-builder",
     "sql",
     "pg"
-  ]
+  ],
+  "allowScripts": {
+    "esbuild": false
+  }
 }

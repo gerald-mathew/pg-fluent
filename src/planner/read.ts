@@ -16,8 +16,13 @@ export interface ReadPlan {
   effectiveOffset: number
   effectiveLimit?: number
   count?: 'exact' | 'planned' | 'estimated'
+  /** Exact count statement. For `estimated`, bounded to `maxRows + 1`. */
   countText?: string
   countValues?: unknown[]
+  /** `SELECT 1 ...` base used to obtain the planner's row estimate. */
+  countPlanText?: string
+  /** Executable row-returning SQL without the JSON response wrapper. */
+  dataText?: string
 }
 
 export interface ReadOptions {
@@ -43,6 +48,18 @@ interface ReadInner {
   effectiveLimit?: number
   effectiveOffset: number
   aggregate: boolean
+  /** True when the filter is applied directly to the table (no CTE). */
+  inline: boolean
+}
+
+/**
+ * A plain read can filter the table directly. The `pgfl_filtered` CTE is only
+ * needed for an exact count (which re-reads the filtered set) and for `!inner`
+ * embeds (whose EXISTS conditions are part of the filter).
+ */
+function canInline(req: ParsedRequest): boolean {
+  if (req.count === 'exact') return false
+  return !req.select.some((item) => item.kind === 'embed' && item.inner)
 }
 
 /** Render the `LEFT JOIN` chain for a related-table ordering path. */
@@ -92,11 +109,13 @@ function buildInner(
   if (preValues) for (const value of preValues) bag.add(value)
   const ctx: BuildContext = { req, bag, maxRows: options.maxRows, counter: { n: 0 }, path: [] }
 
-  const where = renderWhere(req.filters, bag, SRC, {
-    baseAlias: SRC,
+  const inline = canInline(req)
+  const whereAlias = inline ? BASE : SRC
+  const where = renderWhere(req.filters, bag, whereAlias, {
+    baseAlias: whereAlias,
     resolveRel: (relation) => req.filterRelationships?.get(relation),
   })
-  const innerConds = collectInnerConditions(req.select, SRC, ctx)
+  const innerConds = inline ? [] : collectInnerConditions(req.select, SRC, ctx)
   const cteWhere = innerConds.length > 0 ? `${where} AND ${innerConds.join(' AND ')}` : where
 
   const selectParts = buildLevelProjection(req.select, BASE, ctx)
@@ -161,6 +180,60 @@ function buildInner(
     effectiveLimit,
     effectiveOffset,
     aggregate: aggregates.length > 0,
+    inline,
+  }
+}
+
+/** Render the per-row SELECT, reading either the table directly or the CTE. */
+function renderInnerSql(inner: ReadInner, fromExpr: string): string {
+  const source = inner.inline ? `${fromExpr} AS ${BASE}` : `"pgfl_filtered" AS ${BASE}`
+  let sql = `SELECT ${inner.selectParts.join(', ')}\n    FROM ${source}${inner.joins}`
+  if (inner.inline && inner.cteWhere !== 'TRUE') sql += `\n    WHERE ${inner.cteWhere}`
+  if (inner.groupParts.length > 0) sql += `\n    GROUP BY ${inner.groupParts.join(', ')}`
+  if (inner.orderParts.length > 0) sql += `\n    ORDER BY ${inner.orderParts.join(', ')}`
+  if (inner.effectiveLimit !== undefined) sql += `\n    LIMIT ${Math.trunc(inner.effectiveLimit)}`
+  if (inner.effectiveOffset > 0) sql += `\n    OFFSET ${Math.trunc(inner.effectiveOffset)}`
+  return sql
+}
+
+/** Prefix `body` with the filter CTE when the read needs one. */
+function withFilteredCte(inner: ReadInner, fromExpr: string, body: string): string {
+  if (inner.inline) return body
+  return (
+    `WITH "pgfl_filtered" AS NOT MATERIALIZED (\n  SELECT * FROM ${fromExpr} AS ${SRC}\n` +
+    `  WHERE ${inner.cteWhere}\n)\n` +
+    body
+  )
+}
+
+/**
+ * Build the `WHERE` clause for a secondary count/estimate statement. It is
+ * rendered independently of the read's aliases (the read may be inlined
+ * against `"pgfl_base"`), and includes top-level `!inner` conditions so counts
+ * agree with the returned rows.
+ */
+function buildCountWhere(
+  req: ParsedRequest,
+  options: ReadOptions,
+  preValues: unknown[] | undefined
+): { where: string; values: unknown[] } {
+  const bag = new ParamBag()
+  if (preValues) for (const value of preValues) bag.add(value)
+  const ctx: BuildContext = {
+    req,
+    bag,
+    maxRows: options.maxRows,
+    counter: { n: 0 },
+    path: [],
+  }
+  const where = renderWhere(req.filters, bag, SRC, {
+    baseAlias: SRC,
+    resolveRel: (relation) => req.filterRelationships?.get(relation),
+  })
+  const innerConds = collectInnerConditions(req.select, SRC, ctx)
+  return {
+    where: innerConds.length > 0 ? `${where} AND ${innerConds.join(' AND ')}` : where,
+    values: bag.values,
   }
 }
 
@@ -186,13 +259,9 @@ export function planSelectCore(
   preValues?: unknown[]
 ): ReadPlan {
   const inner = buildInner(req, fromExpr, options, preValues)
-  const { bag, cteWhere, selectParts, groupParts, orderParts, joins } = inner
-
-  let innerSql = `SELECT ${selectParts.join(', ')}\n    FROM "pgfl_filtered" AS ${BASE}${joins}`
-  if (groupParts.length > 0) innerSql += `\n    GROUP BY ${groupParts.join(', ')}`
-  if (orderParts.length > 0) innerSql += `\n    ORDER BY ${orderParts.join(', ')}`
-  if (inner.effectiveLimit !== undefined) innerSql += `\n    LIMIT ${Math.trunc(inner.effectiveLimit)}`
-  if (inner.effectiveOffset > 0) innerSql += `\n    OFFSET ${Math.trunc(inner.effectiveOffset)}`
+  const { bag } = inner
+  const innerSql = renderInnerSql(inner, fromExpr)
+  const dataText = withFilteredCte(inner, fromExpr, innerSql)
 
   const tableName = fromExpr
   let rowExpr = `row_to_json(${SUB})`
@@ -207,19 +276,27 @@ export function planSelectCore(
   ]
   let countText: string | undefined
   let countValues: unknown[] | undefined
+  let countPlanText: string | undefined
   if (req.count === 'exact') {
     outerCols.push(`(SELECT count(*) FROM "pgfl_filtered") AS "__pgfl_count"`)
   } else if (req.count === 'planned' || req.count === 'estimated') {
-    const countBag = new ParamBag()
-    if (preValues) for (const value of preValues) countBag.add(value)
-    const countWhere = renderWhere(req.filters, countBag, SRC)
-    countText = `SELECT count(*)::text FROM ${tableName} AS ${SRC} WHERE ${countWhere}`
-    countValues = countBag.values
+    const { where, values } = buildCountWhere(req, options, preValues)
+    countValues = values
+    countPlanText = `SELECT 1 FROM ${tableName} AS ${SRC} WHERE ${where}`
+
+    if (req.count === 'estimated') {
+      countText =
+        options.maxRows === Infinity
+          ? `SELECT count(*)::text FROM ${tableName} AS ${SRC} WHERE ${where}`
+          : `SELECT count(*)::text FROM (${countPlanText} LIMIT ${Math.trunc(options.maxRows) + 1}) AS "pgfl_est"`
+    }
   }
 
-  const text =
-    `WITH "pgfl_filtered" AS (\n  SELECT * FROM ${tableName} AS ${SRC}\n  WHERE ${cteWhere}\n)\n` +
+  const text = withFilteredCte(
+    inner,
+    tableName,
     `SELECT ${outerCols.join(',\n  ')}\nFROM (\n  SELECT COALESCE(json_agg(${rowExpr}), '[]'::json) AS "rows"\n  FROM (\n${innerSql}\n  ) AS ${SUB}\n) AS "pgfl_agg"`
+  )
 
   return {
     text,
@@ -230,6 +307,8 @@ export function planSelectCore(
     count: req.count,
     countText,
     countValues,
+    countPlanText,
+    dataText,
   }
 }
 
@@ -264,17 +343,14 @@ export function planStream(req: ParsedRequest, options: ReadOptions): StreamPlan
     throw notImplemented('Streaming is not yet supported for RPC results')
   }
   const inner = buildInner(req, fromExpr, options, undefined)
-  const { bag, cteWhere, selectParts, groupParts, orderParts, joins } = inner
+  const { bag } = inner
+  const innerSql = renderInnerSql(inner, fromExpr)
 
-  let innerSql = `SELECT ${selectParts.join(', ')}\n    FROM "pgfl_filtered" AS ${BASE}${joins}`
-  if (groupParts.length > 0) innerSql += `\n    GROUP BY ${groupParts.join(', ')}`
-  if (orderParts.length > 0) innerSql += `\n    ORDER BY ${orderParts.join(', ')}`
-  if (inner.effectiveLimit !== undefined) innerSql += `\n    LIMIT ${Math.trunc(inner.effectiveLimit)}`
-  if (inner.effectiveOffset > 0) innerSql += `\n    OFFSET ${Math.trunc(inner.effectiveOffset)}`
-
-  const text =
-    `WITH "pgfl_filtered" AS (\n  SELECT * FROM ${fromExpr} AS ${SRC}\n  WHERE ${cteWhere}\n)\n` +
+  const text = withFilteredCte(
+    inner,
+    fromExpr,
     `SELECT row_to_json("pgfl_stream")::text AS "__pgfl_row"\nFROM (\n${innerSql}\n  ) AS "pgfl_stream"`
+  )
 
   return { text, values: bag.values }
 }

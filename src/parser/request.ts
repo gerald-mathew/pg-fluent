@@ -83,7 +83,7 @@ function parseAccept(header: string | undefined): AcceptInfo {
 function parseNumber(value: string | null, name: string): number | undefined {
   if (value === null) return undefined
   const n = Number(value)
-  if (!Number.isInteger(n) || n < 0) {
+  if (!Number.isSafeInteger(n) || n < 0) {
     throw pgrstError('PGRST100', `Invalid ${name}: ${value}`)
   }
   return n
@@ -200,7 +200,7 @@ export function parseRequest(raw: RawRequest, ctx: RequestParseContext): ParsedR
   let timeoutMs: number | undefined
   if (timeoutRaw !== undefined && timeoutRaw !== '') {
     const n = Number(timeoutRaw)
-    if (!Number.isInteger(n) || n <= 0) {
+    if (!Number.isSafeInteger(n) || n <= 0) {
       throw pgrstError('PGRST100', `Invalid timeout: ${timeoutRaw}`)
     }
     timeoutMs = n

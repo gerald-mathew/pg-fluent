@@ -15,9 +15,22 @@ describe.skipIf(!available)('.toSQL()', () => {
 
   it('renders a select with bound values', async () => {
     const plan = await db.from('pf_todos').select('id, task').eq('done', false).toSQL()
-    expect(plan.text).toContain('FROM "pgfl_filtered"')
+    expect(plan.text).not.toContain('pgfl_filtered')
+    expect(plan.text).toContain('"pf_todos" AS "pgfl_base"')
     expect(plan.text).toContain('WHERE')
     expect(plan.values).toEqual(['false'])
+  })
+
+  it('returns executable data SQL', async () => {
+    const plan = await db
+      .from('pf_todos')
+      .select('id, task')
+      .eq('done', false)
+      .toSQL({ shape: 'data' })
+    expect(plan.text).not.toContain('json_agg')
+    expect(plan.text).not.toContain('row_to_json')
+    const { data } = await db.unsafe(plan.text, plan.values)
+    expect(data).toHaveLength(2)
   })
 
   it('renders an insert as a single JSON parameter', async () => {

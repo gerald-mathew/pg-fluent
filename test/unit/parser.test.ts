@@ -152,6 +152,13 @@ describe('parseRequest', () => {
   it('rejects malformed JSON bodies', () => {
     expect(errorCode(() => req('todos', { method: 'POST', body: '{not json' }))).toBe('PGRST102')
   })
+
+  it('rejects non-safe-integer limit and offset values', () => {
+    expect(errorCode(() => req('todos?limit=1e21'))).toBe('PGRST100')
+    expect(errorCode(() => req('todos?limit=1.5'))).toBe('PGRST100')
+    expect(errorCode(() => req('todos?offset=-1'))).toBe('PGRST100')
+    expect(req('todos?limit=0&offset=0').limit).toBe(0)
+  })
 })
 
 describe('dropped-filter guards', () => {

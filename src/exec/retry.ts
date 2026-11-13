@@ -3,8 +3,14 @@ export interface RetryConfig {
   backoffMs: number
 }
 
-/** SQLSTATEs for transient server-side shutdowns. */
-const TRANSIENT_SQLSTATES = new Set(['57P01', '57P02', '57P03'])
+/** SQLSTATEs that are safe to retry for idempotent reads. */
+const TRANSIENT_SQLSTATES = new Set([
+  '57P01', // admin_shutdown
+  '57P02', // crash_shutdown
+  '57P03', // cannot_connect_now
+  '40001', // serialization_failure
+  '40P01', // deadlock_detected
+])
 
 const TRANSIENT_MESSAGE =
   /ECONNREFUSED|ECONNRESET|EPIPE|ETIMEDOUT|Connection terminated|connection terminated|server closed the connection|timeout exceeded when trying to connect|Client has encountered a connection error/i

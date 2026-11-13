@@ -149,7 +149,28 @@ await db.from('todos').select('*').or('done.eq.true,priority.gt.3')
 await db.from('todos').select('id, meta->>author').eq('meta->>wip', 'true')
 
 const { text, values } = await db.from('todos').select('id').eq('done', false).toSQL() // no execution
+
+// Plain row-returning SQL, without the JSON response envelope.
+const dataPlan = await db.from('todos').select('id').eq('done', false).toSQL({ shape: 'data' })
 ```
+
+`.toSQL()` returns only the primary statement. Secondary count/`EXPLAIN` statements used for
+`count=planned` and `count=estimated` are internal and not exposed.
+
+### Counts
+
+`count` accepts `exact`, `planned` and `estimated`:
+
+- `exact` returns the real number of matching rows (the filtered set is reused through a
+  non-materialized CTE).
+- `planned` returns PostgreSQL's planner estimate from `EXPLAIN (FORMAT JSON)`, so its accuracy
+  depends on the freshness of table statistics (`ANALYZE`).
+- `estimated` returns an exact count when the matching set is at most `maxRows`, and otherwise
+  `max(estimate, maxRows + 1)` — matching PostgREST's `db-max-rows` behaviour. Set
+  `maxRows: Infinity` to always compute an exact count.
+
+Count queries respect the same filters as the read, including top-level `!inner` embed
+conditions, and a failing count query fails the request rather than silently omitting the count.
 
 `.eq('col', null)` (and string `'null'`) compiles to `col IS NULL` — matching PostgREST semantics;
 use `.is('col', null)` for the same result with an explicit intent. An empty `in([])` compiles to an
@@ -409,7 +430,7 @@ What differs from Supabase/PostgREST:
 
 | pg-fluent | Node | PostgreSQL | `@supabase/postgrest-js` |
 |---|---|---|---|
-| 0.2.x | 22, 24 (26 at LTS) | 15, 16, 17, 18 (19 at GA) | pinned exact (see `docs/UPSTREAM.md`) |
+| 0.3.x | 22, 24 (26 at LTS) | 15, 16, 17, 18 (19 at GA) | pinned exact (see `docs/UPSTREAM.md`) |
 
 The pinned `postgrest-js` version is recorded in `docs/UPSTREAM.md`, with the date and reason for
 every bump.

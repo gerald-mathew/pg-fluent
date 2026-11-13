@@ -7,6 +7,7 @@ pinned version and the reason for every bump.
 | Date | Version | Reason |
 |---|---|---|
 | 2026-10-13 | `2.117.3` | Initial pin for the v1 implementation. |
+| 2026-11-08 | `2.119.0` | Dependency refresh shipped with the 0.2.1 release. |
 
 ## Policy
 

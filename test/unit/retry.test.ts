@@ -46,8 +46,21 @@ describe('isTransientError', () => {
     expect(isTransientError({ code: '08006' })).toBe(true)
     expect(isTransientError({ code: '57P01' })).toBe(true)
     expect(isTransientError({ code: '57P03' })).toBe(true)
+    expect(isTransientError({ code: '40001' })).toBe(true)
+    expect(isTransientError({ code: '40P01' })).toBe(true)
     expect(isTransientError({ code: '23505' })).toBe(false)
     expect(isTransientError(new Error('connect ECONNREFUSED 127.0.0.1:5432'))).toBe(true)
     expect(isTransientError(null)).toBe(false)
+  })
+
+  it('retries a serialization failure once, then succeeds', async () => {
+    let calls = 0
+    const { value, attempts } = await withRetry({ max: 1, backoffMs: 0 }, async () => {
+      calls += 1
+      if (calls === 1) throw Object.assign(new Error('could not serialize access'), { code: '40001' })
+      return 'ok'
+    })
+    expect(value).toBe('ok')
+    expect(attempts).toBe(2)
   })
 })
